@@ -2,7 +2,8 @@
 
 **Branch:** `feat/pi4-linux-host`  
 **Last update (UTC):** 2026-07-27  
-**Pre-Pi origin SHA:** `d1dfdaecacade5ffaeef2725a5db23469951db4f`
+**Pre-Pi origin SHA:** `d1dfdaecacade5ffaeef2725a5db23469951db4f`  
+**Tip (pushed):** `4eea5e56f2ed19a5d1f324b32a647153a2ce43c8`
 
 ## Milestone results (this session)
 
