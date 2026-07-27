@@ -1,7 +1,7 @@
 # pi4-host — live status (Kyoto / Telegram pings)
 
 **Branch:** `feat/pi4-linux-host`  
-**Tip (pushed):** `232c20eb6cf78bb640b69dde7ddbc8295689d05f`  
+**Tip (pushed):** see `git rev-parse HEAD` after latest push  
 **Last update (UTC):** 2026-07-27  
 **Base OS (deploy image):** **Buildroot** (busybox init) — **not** Raspberry Pi OS
 
@@ -9,12 +9,10 @@
 
 | Gate | Result | Notes |
 |---|---|---|
-| `make build-pi` | **PASS** (prior) | ELF aarch64 + ALSA → `dist/vinyl-bridge-pi` (~2.9 MiB stripped) |
-| `qemu-smoke.sh binary` | **PASS** (prior) | Docker linux/arm64 + libasound2 → `/api/status` |
-| `qemu-smoke.sh virt` | **PASS** (prior) | Debian cloud guest + unit — validation only |
-| **Buildroot recipe** | **IN TREE** | `buildroot/` br2-external + `deploy/buildroot/build*.sh` |
-| **Buildroot `sdcard.img`** | **see rebuild** | `make image` → `~/.cache/vinyl-bridge-pi-images/vinyl-bridge-pi4.img` |
-| Legacy Pi OS Lite inject | **DEPRECATED** | `deploy/image/*` / `make image-legacy-pios` only |
+| `make build-pi` | **PASS** | ELF aarch64 + ALSA → `dist/vinyl-bridge-pi` |
+| Buildroot recipe | **PASS** | `apps/pi4-host/buildroot/` br2-external |
+| **Buildroot `sdcard.img`** | **PASS** | ~**288 MiB** raw · ~**29 MiB** xz |
+| Legacy Pi OS Lite inject | **DEPRECATED** | multi‑GB; `make image-legacy-pios` only |
 
 **Not claimed:** real ALSA line-in, Wi‑Fi RF, AirPlay→HomePod (stubs).
 
@@ -26,86 +24,81 @@
 | **Defconfig** | `vinyl_rpi4_64_defconfig` (Pi 4, aarch64, bcm2711) |
 | **Init** | busybox SysV (`/etc/init.d/S99vinyl-bridge`) — **no systemd** |
 | **Network** | Ethernet DHCP (`eth0`); Wi‑Fi deferred |
-| **Audio** | ALSA (`alsa-lib` + `arecord`) |
-| **App** | Prebuilt `vinyl-bridge-pi` installed to `/usr/bin` |
-| **Size target** | ~boot 32 MiB + root **256 MiB** ≈ **~300 MiB** raw card image |
+| **Audio** | ALSA (`alsa-lib` + `arecord`/`aplay`) |
+| **SSH** | dropbear (small) |
+| **App** | Prebuilt `vinyl-bridge-pi` → `/usr/bin/vinyl-bridge-pi` |
+| **Size** | boot 32 MiB + root 256 MiB ≈ **288 MiB** raw card image |
 | **Root login** | `root` / `vinyl` (change after first boot) |
 | **Hostname** | `vinyl-bridge` |
 
-**Not used for deploy:** Raspberry Pi OS Lite / Debian inject (legacy path only).
+## Flashable SD image (Buildroot)
 
-## Flashable SD image
+| Artifact | Path | Size |
+|---|---|---|
+| Raw image | `~/.cache/vinyl-bridge-pi-images/vinyl-bridge-pi4.img` | **288 MiB** (301990400 bytes) |
+| Compressed | `…/vinyl-bridge-pi4.img.xz` | **~29 MiB** |
+| Checksums | `…/SHA256SUMS` | — |
+| Build cache (macOS) | Docker volume `vinyl-buildroot-cache` | case-sensitive |
 
-Images are **not** committed. Default paths:
+**SHA256 (this workstation build):**
 
-| Artifact | Path |
-|---|---|
-| Raw image | `~/.cache/vinyl-bridge-pi-images/vinyl-bridge-pi4.img` |
-| Compressed | `~/.cache/vinyl-bridge-pi-images/vinyl-bridge-pi4.img.xz` |
-| Buildroot `O=` | `~/.cache/vinyl-bridge-buildroot/output-vinyl-rpi4-64/` |
-| Package `dl/` | `~/.cache/vinyl-bridge-buildroot/dl/` |
+```
+fb42a77c14c9790f5a1832cc5ae7f47a1d15e341aa7e193551a3f5a7a778d8d3  vinyl-bridge-pi4.img
+2b1517ea693513fbf6bf52df2a28f65d2767b9d1f56c633798dffa471e3c9b97  vinyl-bridge-pi4.img.xz
+```
 
-Repo convenience symlinks (gitignored `dist/`):
+`file(1)`: DOS/MBR boot sector; partition 1 FAT (boot), partition 2 Linux (rootfs).
 
-- `apps/pi4-host/dist/vinyl-bridge-pi4.img`  
-- `apps/pi4-host/dist/vinyl-bridge-pi4.img.xz`
-
-### Rebuild image
+### Rebuild
 
 ```bash
 cd apps/pi4-host
 make build-pi
-make image    # macOS → deploy/buildroot/build.macos.sh (Docker)
-              # Linux → deploy/buildroot/build.sh
+make image    # macOS → deploy/buildroot/build.macos.sh (Docker volume)
 ```
 
-Docs: [`buildroot/README.md`](buildroot/README.md).
+**macOS note:** Buildroot `O=` must be on a **case-sensitive** FS (glibc
+`stamp.os` vs `stamp.oS`). `build.macos.sh` uses Docker volume
+`vinyl-buildroot-cache` — do not bind-mount APFS for the build tree.
 
-### Flash one-liner (macOS)
+### Flash (macOS)
 
 ```bash
-# diskutil list  → pick whole disk e.g. /dev/rdisk4 (NOT a partition)
+# diskutil list → whole disk e.g. /dev/rdisk4
 xzcat ~/.cache/vinyl-bridge-pi-images/vinyl-bridge-pi4.img.xz \
   | sudo dd of=/dev/rdiskN bs=4m status=progress
 diskutil eject /dev/diskN
 ```
 
-**Raspberry Pi Imager:** OS → **Use custom** → `vinyl-bridge-pi4.img` → Write.
+**Raspberry Pi Imager:** OS → Use custom → `vinyl-bridge-pi4.img` → Write.
 
 ### First boot
 
 ```bash
-# Ethernet preferred; serial 115200 or HDMI
-# login: root / vinyl
+# Ethernet; serial 115200 or HDMI. Login: root / vinyl
 ps | grep vinyl
 curl -s http://<pi-ip>/api/status
-# set capture_device from arecord -l in /etc/vinyl-bridge/config.toml
+arecord -l
+vi /etc/vinyl-bridge/config.toml
 /etc/init.d/S99vinyl-bridge restart
 ```
-
-## Binary artifact (app only)
-
-**Path:** `dist/vinyl-bridge-pi`  
-**Build:** `make build-pi` (Docker linux/arm64 + ALSA)
 
 ## Workflow
 
 ```
-make run-macos          # daily CoreAudio loop (separate from image)
+make run-macos          # daily CoreAudio (separate from image)
 make build-pi           # aarch64 ELF for appliance
 make image              # Buildroot → ~/.cache/.../vinyl-bridge-pi4.img
-# flash card → first boot → curl /api/status
+# flash → first boot → curl /api/status
 ```
 
-## Legacy (do not use for product)
+## Legacy
 
 | Path | Status |
 |---|---|
-| `deploy/image/build-sd-image*.sh` | **Deprecated** — Pi OS Lite inject |
-| `make image-legacy-pios` | Emergency only |
-| Prior multi‑GB Pi OS card images | Superseded by Buildroot |
+| `deploy/image/*` Pi OS Lite inject | **Deprecated** |
+| Prior ~2.8 GiB Pi OS card images | Superseded (~288 MiB Buildroot) |
 
 ## Parity
 
-Control plane OK on aarch64 Linux. Appliance packaging is **Buildroot**.  
-AirPlay 2 / Chromecast still stubs.
+Control plane + **Buildroot packaging** OK. AirPlay 2 / Chromecast still stubs.

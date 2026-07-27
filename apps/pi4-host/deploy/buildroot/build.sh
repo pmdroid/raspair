@@ -133,10 +133,18 @@ SDCARD="${OUTPUT_DIR}/images/sdcard.img"
 OUT_IMG="${IMAGE_OUT}/vinyl-bridge-pi4.img"
 OUT_XZ="${OUT_IMG}.xz"
 log "copying image → $OUT_IMG"
-cp -f "$SDCARD" "$OUT_IMG"
+# Prefer cat/dd over cp: OrbStack bind mounts often fail cp with
+# "error deallocating: Invalid argument" after a partial write.
+if ! cat "$SDCARD" >"$OUT_IMG" 2>/dev/null; then
+  # Fallback: docker volume → host may still reject; try dd
+  dd if="$SDCARD" of="$OUT_IMG" bs=4M status=none conv=fsync 2>/dev/null \
+    || die "failed to write $OUT_IMG (try: docker exec … cat $SDCARD > hostpath)"
+fi
+# Sanity: raw image should be tens..hundreds of MiB, not empty
+bytes=$(wc -c <"$OUT_IMG" | tr -d ' ')
+[[ "$bytes" -gt 10000000 ]] || die "image too small ($bytes bytes) — copy likely failed"
 
 log "compressing → $OUT_XZ"
-# Prefer multi-thread xz when available
 if xz -T0 -f -k -c "$OUT_IMG" >"${OUT_XZ}.tmp" 2>/dev/null; then
   mv -f "${OUT_XZ}.tmp" "$OUT_XZ"
 else

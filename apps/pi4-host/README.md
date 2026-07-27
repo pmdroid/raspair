@@ -107,7 +107,7 @@ Pi OS Lite).
 |---|---|---|
 | aarch64 + ALSA binary | `make build-pi` | `dist/vinyl-bridge-pi` |
 | Binary smoke | `./scripts/qemu-smoke.sh binary` | `/api/status` on linux/arm64 |
-| **Buildroot image** | `make image` | `vinyl-bridge-pi4.img` (+ `.xz`) |
+| **Buildroot image** | `make image` | **PASS** ~288 MiB `.img` / ~29 MiB `.xz` |
 
 Full board docs: **[`buildroot/README.md`](buildroot/README.md)**.
 
