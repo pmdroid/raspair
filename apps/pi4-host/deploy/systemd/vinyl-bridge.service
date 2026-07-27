@@ -1,0 +1,28 @@
+[Unit]
+Description=Vinyl Audio Bridge (Pi host)
+Documentation=https://github.com/pmdroid/vinyl-repo
+After=network-online.target sound.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+ExecStart=/usr/local/bin/vinyl-bridge-pi --config /etc/vinyl-bridge/config.toml
+Restart=on-failure
+RestartSec=2
+Environment=RUST_LOG=info
+# Real-time-ish audio: allow higher priority without full RT privileges.
+LimitRTPRIO=20
+LimitMEMLOCK=infinity
+# Capture + HTTP
+AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_SYS_NICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_SYS_NICE CAP_SYS_RESOURCE
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/vinyl-bridge /etc/vinyl-bridge /tmp
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

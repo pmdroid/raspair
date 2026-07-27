@@ -1,0 +1,50 @@
+[package]
+name = "vinyl-bridge-pi"
+version = "0.1.0"
+edition = "2021"
+description = "Vinyl Audio Bridge host for Raspberry Pi 4 (Linux) — line-in → AirPlay 2 / Chromecast"
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/pmdroid/vinyl-repo"
+keywords = ["airplay", "vinyl", "audio", "raspberry-pi"]
+categories = ["multimedia::audio"]
+
+[[bin]]
+name = "vinyl-bridge-pi"
+path = "src/main.rs"
+
+[features]
+default = []
+# Enable ALSA capture on Linux (Pi). Off by default so macOS/dev hosts still build.
+alsa = ["dep:alsa"]
+
+[dependencies]
+anyhow = "1"
+axum = { version = "0.8", features = ["multipart"] }
+bytes = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+clap = { version = "4", features = ["derive", "env"] }
+futures-util = "0.3"
+hostname = "0.4"
+mdns-sd = "0.13"
+parking_lot = "0.12"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["io"] }
+toml = "0.8"
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4"] }
+libc = "0.2"
+
+# Optional: real line-in on Linux (Raspberry Pi + USB/I2S sound card).
+alsa = { version = "0.9", optional = true }
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+opt-level = 3

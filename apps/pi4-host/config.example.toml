@@ -1,0 +1,38 @@
+# Vinyl Bridge Pi — copy to /etc/vinyl-bridge/config.toml (or pass --config).
+
+device_name = "Vinyl Bridge"
+http_bind = "0.0.0.0:80"
+mdns_hostname = "vinyl-bridge"
+
+# ALSA capture device (see `arecord -l`). Use "default" or a hw: card.
+# On a Pi with USB ADC or I2S HAT this is the line-in path.
+capture_device = "default"
+sample_rate = 48000
+channels = 2
+# Bits per sample at the ALSA device (16 or 24). 24-bit is preferred.
+bits = 24
+
+# Recording directory (replaces microSD mount on the ESP path).
+record_dir = "/var/lib/vinyl-bridge/rec"
+record_min_free_bytes = 16777216  # 16 MiB
+
+# Signal gate (dBFS) — open AirPlay when RMS exceeds start threshold.
+audio_start_threshold_db = -45.0
+audio_start_hold_ms = 250
+audio_stop_threshold_db = -52.0
+audio_stop_timeout_sec = 15
+
+# Startup volume sent to speakers (dB attenuation; 0 = full).
+volume_db = -30.0
+
+# When true, force a session open without waiting for signal gate.
+# Useful for bring-up without a turntable connected.
+force_open = false
+
+# Optional fixed targets (overridden by POST /api/select from Android).
+# [[targets]]
+# name = "Living Room"
+# ip = "192.168.1.50"
+# device_id = "AA:BB:CC:DD:EE:FF"
+# port = 7000
+# type = "airplay"   # or "chromecast"
