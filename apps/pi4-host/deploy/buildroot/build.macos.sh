@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
-# macOS entrypoint: run Buildroot inside a privileged Linux container.
+# macOS entrypoint: run Buildroot inside a Linux container.
 #
 # Why Docker: Buildroot does not support macOS as a build host.
-# Why stream via tar: OrbStack + external volumes (/Volumes/Data) often break
-# bind-mount exec; same pattern as the legacy Pi OS image wrapper.
+# Why Docker named volumes for /cache: macOS APFS is usually *case-insensitive*.
+#   glibc creates both stamp.os and stamp.oS — they collide on APFS bind mounts
+#   and the toolchain fails with "No rule to make target .../stdlib/stamp.os".
+#   Linux Docker volumes are case-sensitive ext4 and avoid that.
+# Why stream sources via tar: OrbStack + /Volumes/Data bind mounts often break.
 #
 # Prerequisites:
 #   - Docker running
@@ -12,15 +15,18 @@
 # Usage:
 #   ./deploy/buildroot/build.macos.sh
 #   IMAGE_OUT=… JOBS=8 ./deploy/buildroot/build.macos.sh
+#
+# Cache volume: vinyl-buildroot-cache (docker volume)
+# Final images are copied out to IMAGE_OUT on the host (case-insensitive OK).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 DIST="${ROOT}/dist"
 BIN="${DIST}/vinyl-bridge-pi"
 IMAGE_OUT="${IMAGE_OUT:-${HOME}/.cache/vinyl-bridge-pi-images}"
-BUILDROOT_CACHE="${BUILDROOT_CACHE:-${HOME}/.cache/vinyl-bridge-buildroot}"
 BUILDROOT_VERSION="${BUILDROOT_VERSION:-2024.02.9}"
 JOBS="${JOBS:-$(sysctl -n hw.ncpu 2>/dev/null || echo 4)}"
+CACHE_VOL="${BUILDROOT_CACHE_VOL:-vinyl-buildroot-cache}"
 CTR="vinyl-br-build-$$"
 
 if [[ ! -f "$BIN" ]]; then
@@ -32,7 +38,8 @@ if ! command -v docker >/dev/null 2>&1; then
   exit 1
 fi
 
-mkdir -p "$IMAGE_OUT" "$BUILDROOT_CACHE"
+mkdir -p "$IMAGE_OUT"
+docker volume create "$CACHE_VOL" >/dev/null
 
 cleanup_ctr() {
   docker rm -f "$CTR" >/dev/null 2>&1 || true
@@ -40,10 +47,11 @@ cleanup_ctr() {
 trap cleanup_ctr EXIT
 
 echo "==> starting Linux build container ($CTR)"
-# Mount cache + image output as named/host paths on the Mac home volume (reliable).
-# Sources are streamed via tar into /work inside the container.
+echo "    cache volume: $CACHE_VOL  (case-sensitive; do NOT bind-mount macOS APFS for O=)"
+echo "    image out:    $IMAGE_OUT"
+# IMAGE_OUT stays on the host (final .img only). Build tree stays in Docker volume.
 docker run --name "$CTR" -d \
-  -v "${BUILDROOT_CACHE}:/cache" \
+  -v "${CACHE_VOL}:/cache" \
   -v "${IMAGE_OUT}:/out" \
   debian:bookworm-slim \
   sleep 86400 >/dev/null
@@ -82,7 +90,6 @@ docker exec -e BUILDROOT_VERSION="$BUILDROOT_VERSION" \
 
 echo "==> Buildroot image ready under $IMAGE_OUT"
 ls -lh "$IMAGE_OUT"/vinyl-bridge-pi4.img* 2>/dev/null || true
-# Symlink into dist from host
 ln -sfn "${IMAGE_OUT}/vinyl-bridge-pi4.img" "${DIST}/vinyl-bridge-pi4.img"
 ln -sfn "${IMAGE_OUT}/vinyl-bridge-pi4.img.xz" "${DIST}/vinyl-bridge-pi4.img.xz" 2>/dev/null || true
 echo "OK: ${IMAGE_OUT}/vinyl-bridge-pi4.img"

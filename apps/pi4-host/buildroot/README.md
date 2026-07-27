@@ -52,9 +52,21 @@ make image
 |---|---|
 | Raw SD image | `~/.cache/vinyl-bridge-pi-images/vinyl-bridge-pi4.img` |
 | Compressed | `…/vinyl-bridge-pi4.img.xz` |
-| Buildroot `O=` | `~/.cache/vinyl-bridge-buildroot/output-vinyl-rpi4-64/` |
-| Package dl cache | `~/.cache/vinyl-bridge-buildroot/dl/` |
+| Buildroot cache (Linux) | `$BUILDROOT_CACHE` (must be **case-sensitive**) |
+| Buildroot cache (macOS) | Docker volume `vinyl-buildroot-cache` → `/cache` |
 | Convenience links | `apps/pi4-host/dist/vinyl-bridge-pi4.img{,.xz}` (gitignored) |
+
+### Case-sensitive filesystem requirement
+
+glibc creates both `stamp.os` and `stamp.oS`. On **case-insensitive APFS**
+(default macOS) those collide and the toolchain dies with:
+
+```text
+No rule to make target '.../stdlib/stamp.os'
+```
+
+**macOS:** always use `make image` / `build.macos.sh` (Docker volume is ext4).  
+**Do not** point `BUILDROOT_CACHE` at `~/…` or `/Volumes/Data` for the build tree.
 
 Override destinations:
 

@@ -27,6 +27,9 @@ BIN="${DIST}/vinyl-bridge-pi"
 STAGE_BIN="${EXTERNAL}/package/vinyl-bridge-pi/bin/vinyl-bridge-pi"
 
 BUILDROOT_VERSION="${BUILDROOT_VERSION:-2024.02.9}"
+# IMPORTANT: O= and package build dirs MUST live on a case-sensitive filesystem.
+# macOS APFS (default) is case-insensitive — glibc stamp.os vs stamp.oS collides.
+# On macOS, build.macos.sh uses a Docker named volume mounted at /cache.
 BUILDROOT_CACHE="${BUILDROOT_CACHE:-${HOME}/.cache/vinyl-bridge-buildroot}"
 IMAGE_OUT="${IMAGE_OUT:-${HOME}/.cache/vinyl-bridge-pi-images}"
 JOBS="${JOBS:-$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)}"
@@ -40,6 +43,20 @@ BR_URL_GH="https://github.com/buildroot/buildroot/archive/refs/tags/${BUILDROOT_
 
 log() { printf '==> %s\n' "$*"; }
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
+
+mkdir -p "$BUILDROOT_CACHE" 2>/dev/null || true
+# Soft check: detect case-insensitive FS early.
+if touch "${BUILDROOT_CACHE}/.case_A_$$" 2>/dev/null; then
+  if touch "${BUILDROOT_CACHE}/.case_a_$$" 2>/dev/null \
+    && [[ "$(ls -1 "${BUILDROOT_CACHE}"/.case_[Aa]_$$ 2>/dev/null | wc -l | tr -d ' ')" -lt 2 ]]; then
+    rm -f "${BUILDROOT_CACHE}/.case_A_$$" "${BUILDROOT_CACHE}/.case_a_$$" 2>/dev/null || true
+    die "BUILDROOT_CACHE is on a case-insensitive filesystem ($BUILDROOT_CACHE).
+glibc cannot build there (stamp.os vs stamp.oS).
+  macOS: use ./deploy/buildroot/build.macos.sh (Docker named volume)
+  Linux: point BUILDROOT_CACHE at an ext4/xfs/btrfs path"
+  fi
+  rm -f "${BUILDROOT_CACHE}/.case_A_$$" "${BUILDROOT_CACHE}/.case_a_$$" 2>/dev/null || true
+fi
 
 if [[ "$(uname -s)" != "Linux" ]]; then
   die "Buildroot must run on Linux. On macOS use: ./deploy/buildroot/build.macos.sh"
