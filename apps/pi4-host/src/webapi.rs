@@ -59,6 +59,7 @@ async fn root_get(State(st): State<AppState>) -> Json<Value> {
         "version": env!("CARGO_PKG_VERSION"),
         "platform": "raspberry-pi",
         "api": "/api/status",
+        "platform": std::env::consts::OS,
     }))
 }
 
@@ -72,14 +73,18 @@ async fn status_get(State(st): State<AppState>) -> Json<Value> {
         "rms_dbfs": st.capture.rms_dbfs(),
         "targets": targets,
         "record": rec,
-        "platform": "raspberry-pi",
+        "platform": std::env::consts::OS,
         "version": env!("CARGO_PKG_VERSION"),
         "airplay": st.airplay.info(&targets),
         "chromecast": st.chromecast.info(&targets),
         "parity": {
             "airplay2": "stub",
             "chromecast": "stub",
-            "capture": if cfg!(feature = "alsa") { "alsa" } else { "silence" },
+            "capture": st.capture.backend(),
+            "capture_features": {
+                "cpal": cfg!(feature = "cpal"),
+                "alsa": cfg!(feature = "alsa"),
+            },
             "http_api": "ok",
             "record": "ok",
             "mdns": "ok",

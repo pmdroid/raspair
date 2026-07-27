@@ -4,8 +4,10 @@ device_name = "Vinyl Bridge"
 http_bind = "0.0.0.0:80"
 mdns_hostname = "vinyl-bridge"
 
-# ALSA capture device (see `arecord -l`). Use "default" or a hw: card.
-# On a Pi with USB ADC or I2S HAT this is the line-in path.
+# Capture device:
+#   macOS (cpal/CoreAudio): "default" or substring of device name
+#     (System Settings → Sound → Input; or log line at startup).
+#   Linux/Pi (ALSA): see `arecord -l` — "default" or "hw:1,0".
 capture_device = "default"
 sample_rate = 48000
 channels = 2

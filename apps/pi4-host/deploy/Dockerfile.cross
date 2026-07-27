@@ -19,7 +19,10 @@ RUN rustup target add aarch64-unknown-linux-gnu
 ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc \
     PKG_CONFIG_ALLOW_CROSS=1 \
     PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig \
-    CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc
+    CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc \
+    PATH=/usr/local/cargo/bin:/usr/local/rustup/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+    RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo
 
 WORKDIR /src
-CMD ["bash", "-lc", "cargo build --release --target aarch64-unknown-linux-gnu --features alsa && mkdir -p dist && cp target/aarch64-unknown-linux-gnu/release/vinyl-bridge-pi dist/ && aarch64-linux-gnu-strip dist/vinyl-bridge-pi && ls -lh dist/vinyl-bridge-pi"]
+CMD ["bash", "-c", "set -euo pipefail; cargo build --release --target aarch64-unknown-linux-gnu --features alsa && mkdir -p dist && cp target/aarch64-unknown-linux-gnu/release/vinyl-bridge-pi dist/ && aarch64-linux-gnu-strip dist/vinyl-bridge-pi && file dist/vinyl-bridge-pi && ls -lh dist/vinyl-bridge-pi"]

@@ -2,11 +2,11 @@
 name = "vinyl-bridge-pi"
 version = "0.1.0"
 edition = "2021"
-description = "Vinyl Audio Bridge host for Raspberry Pi 4 (Linux) — line-in → AirPlay 2 / Chromecast"
+description = "Vinyl Audio Bridge host — Raspberry Pi 4 (Linux) + macOS dev loop"
 license = "MIT"
 readme = "README.md"
 repository = "https://github.com/pmdroid/vinyl-repo"
-keywords = ["airplay", "vinyl", "audio", "raspberry-pi"]
+keywords = ["airplay", "vinyl", "audio", "raspberry-pi", "macos"]
 categories = ["multimedia::audio"]
 
 [[bin]]
@@ -14,8 +14,11 @@ name = "vinyl-bridge-pi"
 path = "src/main.rs"
 
 [features]
-default = []
-# Enable ALSA capture on Linux (Pi). Off by default so macOS/dev hosts still build.
+# Default: cpal → CoreAudio on macOS (fast local loop). Linux/Pi: add `alsa`.
+default = ["cpal"]
+# Portable capture (CoreAudio / WASAPI / Pulse). Preferred for macOS daily dev.
+cpal = ["dep:cpal"]
+# Linux/Pi line-in. Feature-gated so macOS builds never pull libasound.
 alsa = ["dep:alsa"]
 
 [dependencies]
@@ -40,7 +43,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4"] }
 libc = "0.2"
 
-# Optional: real line-in on Linux (Raspberry Pi + USB/I2S sound card).
+# Optional capture backends
+cpal = { version = "0.15", optional = true }
 alsa = { version = "0.9", optional = true }
 
 [profile.release]

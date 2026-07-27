@@ -13,15 +13,6 @@ pub enum TargetType {
     Chromecast,
 }
 
-impl TargetType {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Airplay => "airplay",
-            Self::Chromecast => "chromecast",
-        }
-    }
-}
-
 impl Default for TargetType {
     fn default() -> Self {
         Self::Airplay

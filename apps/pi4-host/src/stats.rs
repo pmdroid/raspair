@@ -37,7 +37,7 @@ impl Stats {
         StatsSnapshot {
             uptime_s: self.started.elapsed().as_secs(),
             version: env!("CARGO_PKG_VERSION").to_string(),
-            platform: "linux-pi".to_string(),
+            platform: std::env::consts::OS.to_string(),
             capture_blocks: self.capture_blocks.load(Ordering::Relaxed),
             sessions_started: self.sessions_started.load(Ordering::Relaxed),
             sessions_stopped: self.sessions_stopped.load(Ordering::Relaxed),

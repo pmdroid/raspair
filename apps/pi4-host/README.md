@@ -1,11 +1,17 @@
-# vinyl-bridge-pi — Raspberry Pi 4 Linux host
+# vinyl-bridge-pi — Linux (Pi 4) host + macOS dev loop
 
-Standalone **Rust** host that mirrors the ESP32-P4 / C5 firmware control surface
-on minimal Linux (Raspberry Pi OS Lite 64-bit).
+Standalone **Rust** host that mirrors the ESP32-P4 / C5 firmware control surface.
+
+| Loop | Platform | Capture | When |
+|---|---|---|---|
+| **Daily (preferred)** | **macOS** (Pascal’s machine) | **cpal → CoreAudio** | API, gate, record, session logic |
+| Deploy | Raspberry Pi 4 (64-bit) | **ALSA** | Image + systemd + real line-in |
+| Validate deploy | QEMU aarch64 (`virt` / `raspi4b`) | silence/ALSA in guest | Before calling an image flash-ready |
 
 ```
-  line-in (ALSA / USB or I2S HAT) ──► Pi 4 (vinyl-bridge-pi)
-                                         │ HTTP :80 + mDNS _vinylbridge._tcp
+  macOS mic/line (CoreAudio/cpal) ──► vinyl-bridge-pi (dev)
+  Pi line-in (ALSA / USB / I2S HAT) ──► vinyl-bridge-pi (deploy)
+                                         │ HTTP + mDNS _vinylbridge._tcp
                                          │ AirPlay 2 / Chromecast (scaffolded)
                                          ▼
                                       HomePod / Cast speakers
@@ -14,37 +20,69 @@ on minimal Linux (Raspberry Pi OS Lite 64-bit).
 | Piece | Path |
 |---|---|
 | App (Rust) | `src/` |
+| Live status (Kyoto pings) | [`STATUS.md`](STATUS.md) |
+| **Makefile / justfile** | `make build-macos` · `make build-pi` |
 | Config example | `config.example.toml` |
 | systemd unit | `deploy/systemd/vinyl-bridge.service` |
-| Cross-build (Docker) | `deploy/Dockerfile.cross` + `scripts/build-release.sh` |
-| Flashable SD recipe | `deploy/image/build-sd-image.sh` |
+| Pi binary (Docker) | `scripts/build-release.sh` |
+| SD image recipe | `deploy/image/build-sd-image.sh` |
+| QEMU smoke | `scripts/qemu-smoke.sh` (**gate before “flash-ready”**) |
 | SSH install (running Pi) | `scripts/install-on-running-pi.sh` |
 
-## Why Rust
+## Features (Cargo)
 
-- Low-latency capture + future crypto/ALAC path without a GC pause model
-- Easy static-ish release binary for aarch64
-- Existing experimental interest under `apps/airplay-rs/` (build tree only)
+| Feature | Default | Backend | Platform |
+|---|---|---|---|
+| `cpal` | **yes** | CoreAudio (macOS), WASAPI/Pulse elsewhere | macOS fast loop |
+| `alsa` | no | ALSA `libasound` | Linux / Raspberry Pi only |
 
-## Dev build (any host)
+ALSA is **feature-gated** so macOS never links `libasound`. Pi release builds use
+`--no-default-features --features alsa`.
+
+## macOS fast loop (preferred)
 
 ```bash
 cd apps/pi4-host
-cargo build
-# non-root HTTP:
-cargo run -- --http-bind 127.0.0.1:8080
-curl -s localhost:8080/api/status | jq .
+
+# Make / just
+make build-macos          # or: just build-macos
+make run-macos            # HTTP 127.0.0.1:8080
+make test-macos           # short curl smoke
+
+# Raw cargo (same thing)
+cargo build --release --features cpal
+cargo run --features cpal -- --http-bind 127.0.0.1:8080
+
+curl -s http://127.0.0.1:8080/api/status | jq .
+# parity.capture should be "cpal" when an input device opens
 ```
 
-On Linux with ALSA:
+**CoreAudio notes**
+
+- Default input = System Settings → Sound → Input (or USB ADC).
+- Override: `capture_device = "USB"` (substring match) in config, or leave `"default"`.
+- Grant **Microphone** permission to the terminal/app on first run (macOS privacy).
+- Recordings default to `/var/lib/vinyl-bridge/rec` — on macOS either run with a
+  local config (`record_dir = "./rec"`) or `sudo mkdir -p` that path.
+
+Example local config:
 
 ```bash
-cargo run --features alsa -- --http-bind 0.0.0.0:8080
+cp config.example.toml /tmp/vinyl.toml
+# edit record_dir = "/tmp/vinyl-rec"
+cargo run --features cpal -- --config /tmp/vinyl.toml --http-bind 127.0.0.1:8080
 ```
 
-Default capture without `--features alsa` is a **silence generator** (so macOS
-and CI still compile). Signal gate, record, and HTTP still exercise the same
-control paths as the firmware.
+## Linux / Pi build
+
+```bash
+# On the Pi (native aarch64)
+cargo build --release --no-default-features --features alsa
+
+# On macOS → aarch64 artifact for SD/QEMU
+make build-pi             # or: just build-pi
+# → dist/vinyl-bridge-pi
+```
 
 ## HTTP API (parity with p4-bridge)
 
@@ -65,6 +103,9 @@ default `vinyl-bridge.local`.
 ---
 
 ## Flashable SD card path
+
+**Do not call the image flash-ready until QEMU smoke is green** (or hardware
+boot is confirmed). The recipe alone only *assembles* an image.
 
 ### 1) Build the aarch64 binary
 
@@ -107,7 +148,78 @@ The recipe:
 6. Enables SSH (`/boot/firmware/ssh` or `/boot/ssh`)
 7. Writes `dist/vinyl-bridge-pi4.img(.xz)`
 
-### 3) Flash the card
+### 3) QEMU smoke (prefer before flashing)
+
+Install QEMU 8+ (`brew install qemu` on macOS; `apt install qemu-system-arm` on Debian).
+
+```bash
+cd apps/pi4-host
+
+# Fast: aarch64 binary under Docker linux/arm64 → curl /api/status
+./scripts/qemu-smoke.sh binary
+
+# Boot path: Debian arm64 cloud on -M virt + systemd unit + binary via 9p
+./scripts/qemu-smoke.sh virt
+
+# Full SD image (needs dist/vinyl-bridge-pi4.img + QEMU with raspi4b)
+./scripts/qemu-smoke.sh image
+
+# binary + virt (+ image if present)
+./scripts/qemu-smoke.sh all
+```
+
+#### Manual QEMU commands (reference)
+
+**A) Binary-only (Docker multiarch — no full OS boot):**
+
+```bash
+docker run --rm --platform linux/arm64 -p 18080:8080 \
+  -v "$PWD/dist/vinyl-bridge-pi:/vinyl-bridge-pi:ro" \
+  debian:bookworm-slim \
+  /vinyl-bridge-pi --http-bind 0.0.0.0:8080
+# other terminal:
+curl -s http://127.0.0.1:18080/api/status
+```
+
+**B) System emulation — `-M virt` (widely available):**
+
+```bash
+# After qemu-smoke prepares overlay/seed, equivalent shape:
+qemu-system-aarch64 \
+  -machine virt -cpu max -m 1024 -smp 2 -nographic \
+  -drive if=virtio,format=qcow2,file=dist/qemu-work/virt-overlay.qcow2 \
+  -drive if=virtio,format=raw,file=dist/qemu-work/seed.iso \
+  -fsdev local,id=fsdev0,path=$PWD/dist,security_model=mapped \
+  -device virtio-9p-device,fsdev=fsdev0,mount_tag=host \
+  -netdev user,id=net0,hostfwd=tcp::18080-:80 \
+  -device virtio-net-device,netdev=net0
+```
+
+**C) Pi 4 machine model — `-M raspi4b` (when your QEMU lists it):**
+
+```bash
+qemu-system-aarch64 -machine help | grep raspi4b
+
+# kernel8.img + bcm2711-rpi-4-b.dtb from the image boot partition:
+qemu-system-aarch64 \
+  -machine raspi4b -cpu cortex-a72 -m 2048 -nographic \
+  -kernel kernel8.img -dtb bcm2711-rpi-4-b.dtb \
+  -drive file=dist/vinyl-bridge-pi4.img,if=sd,format=raw \
+  -append "console=ttyAMA0,115200 root=/dev/mmcblk0p2 rootwait rw" \
+  -device usb-net,netdev=net0 \
+  -netdev user,id=net0,hostfwd=tcp::18080-:80
+```
+
+| What QEMU proves | What it does **not** prove |
+|---|---|
+| aarch64 binary runs | Real WM8782/USB line-in quality |
+| systemd unit starts (virt) | Wi‑Fi / mDNS on real RF |
+| HTTP `/api/status` | AirPlay → HomePod (still stub) |
+| raspi4b boots SD image (if machine exists) | Full USB audio / HAT passthrough |
+
+If `raspi4b` is missing, treat **virt + binary** as the gate for “image recipe is sane”; still do a hardware flash before shipping cards.
+
+### 4) Flash the card (after smoke)
 
 **Raspberry Pi Imager (recommended)**
 
@@ -130,7 +242,7 @@ diskutil eject /dev/diskN
 xzcat dist/vinyl-bridge-pi4.img.xz | sudo dd of=/dev/sdX bs=4M status=progress conv=fsync
 ```
 
-### 4) First boot
+### 5) First boot
 
 1. Ethernet (or preconfigured Wi‑Fi via Imager)
 2. SSH: `ssh vinyl@vinyl-bridge.local` (or the user you set in Imager)

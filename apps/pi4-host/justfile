@@ -1,0 +1,56 @@
+# Vinyl Bridge host — https://github.com/casey/just
+# Prefer macOS for the daily loop; Pi/QEMU for deploy validation.
+
+set shell := ["bash", "-cu"]
+
+http_bind := env("HTTP_BIND", "127.0.0.1:8080")
+
+# List recipes
+default:
+    @just --list
+
+# Native macOS binary (cpal → CoreAudio). Fast local loop.
+build-macos:
+    cargo build --release --features cpal
+    @file target/release/vinyl-bridge-pi || true
+    @echo "→ target/release/vinyl-bridge-pi"
+
+# Run on macOS (non-root port by default)
+run-macos:
+    cargo run --features cpal -- --http-bind {{http_bind}}
+
+# Debug iterate
+build-macos-debug:
+    cargo build --features cpal
+
+# Short HTTP smoke on macOS
+test-macos: build-macos-debug
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ./target/debug/vinyl-bridge-pi --http-bind {{http_bind}} --log warn &
+    pid=$!
+    trap 'kill $pid 2>/dev/null || true' EXIT
+    sleep 1
+    curl -fsS "http://{{http_bind}}/api/status" | head -c 500
+    echo
+    echo "PASS test-macos"
+
+# aarch64 Linux + ALSA → dist/vinyl-bridge-pi (Docker)
+build-pi:
+    ./scripts/build-release.sh
+    @file dist/vinyl-bridge-pi || true
+
+# QEMU / Docker aarch64 smoke (deploy gate)
+qemu-smoke:
+    ./scripts/qemu-smoke.sh
+
+qemu-binary:
+    ./scripts/qemu-smoke.sh binary
+
+# Assemble flashable SD image (Linux / privileged Docker)
+image:
+    ./deploy/image/build-sd-image.sh
+
+clean:
+    cargo clean
+    rm -rf dist/qemu-work

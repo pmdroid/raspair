@@ -119,7 +119,12 @@ fn default_bits() -> u16 {
     24
 }
 fn default_record_dir() -> PathBuf {
-    PathBuf::from("/var/lib/vinyl-bridge/rec")
+    // macOS daily loop: writable CWD path. Pi/systemd image uses /var/lib.
+    if cfg!(target_os = "macos") {
+        PathBuf::from("./rec")
+    } else {
+        PathBuf::from("/var/lib/vinyl-bridge/rec")
+    }
 }
 fn default_record_min_free() -> u64 {
     16 * 1024 * 1024
