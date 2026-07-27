@@ -1,7 +1,7 @@
 # pi4-host — live status (Kyoto / Telegram pings)
 
 **Branch:** `feat/pi4-linux-host`  
-**Tip (pushed):** `e0f97bacb4df9158947ab7dac07c60a713cb5cde`
+**Tip (pushed):** `2f6451f33e6ea382da0c26da582b1eb629f38717`
 **Last update (UTC):** 2026-07-27  
 **Pre-Pi origin SHA:** `d1dfdaecacade5ffaeef2725a5db23469951db4f`
 
