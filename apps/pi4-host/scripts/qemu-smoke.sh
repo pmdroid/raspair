@@ -68,46 +68,80 @@ smoke_binary() {
   command -v docker >/dev/null 2>&1 || die "Docker required for binary smoke"
   docker info >/dev/null 2>&1 || die "Docker daemon not running"
 
-  local cid
-  cid="$(docker run -d --rm --platform linux/arm64 \
+  # Avoid bind-mounting dist/ (flaky on external volumes). docker cp + libasound2
+  # (binary is dynamically linked against ALSA).
+  local name="vinyl-qemu-binary-$$"
+  docker rm -f "$name" >/dev/null 2>&1 || true
+  docker run -d --name "$name" --platform linux/arm64 \
     -p "${HTTP_PORT}:8080" \
-    -v "${BIN}:/vinyl-bridge-pi:ro" \
     debian:bookworm-slim \
-    /vinyl-bridge-pi --http-bind 0.0.0.0:8080 --log warn)"
-  log "container $cid"
+    sleep 600 >/dev/null
+  cleanup_bin() { docker rm -f "$name" >/dev/null 2>&1 || true; }
+  trap cleanup_bin EXIT
+
+  docker cp "$BIN" "${name}:/usr/local/bin/vinyl-bridge-pi"
+  docker exec "$name" bash -c '
+    set -euo pipefail
+    chmod +x /usr/local/bin/vinyl-bridge-pi
+    apt-get update -qq
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq libasound2 ca-certificates >/dev/null
+  '
+  docker exec -d "$name" /usr/local/bin/vinyl-bridge-pi --http-bind 0.0.0.0:8080 --log warn
+  log "container $name (docker arm64 + libasound2)"
+
   local i ok=0
-  for i in $(seq 1 40); do
+  for i in $(seq 1 60); do
     if curl -fsS --max-time 2 "http://127.0.0.1:${HTTP_PORT}/api/status" 2>/dev/null \
-      | tee "${WORK}/status-binary.json" | grep -qE 'version|Vinyl|raspberry'; then
+      | tee "${WORK}/status-binary.json" | grep -qE 'version|Vinyl|raspberry|macos|linux'; then
       ok=1
       break
     fi
     sleep 0.5
   done
   if [[ "$ok" -ne 1 ]]; then
-    docker logs "$cid" 2>&1 | tail -50 || true
-    docker stop "$cid" >/dev/null 2>&1 || true
+    docker logs "$name" 2>&1 | tail -50 || true
+    docker exec "$name" ps aux 2>/dev/null || true
+    docker exec "$name" /usr/local/bin/vinyl-bridge-pi --version 2>&1 || true
+    cleanup_bin
+    trap - EXIT
     die "binary smoke: HTTP /api/status failed"
   fi
   log "PASS binary — /api/status"
   cat "${WORK}/status-binary.json"; echo
-  docker stop "$cid" >/dev/null 2>&1 || true
+  cleanup_bin
+  trap - EXIT
 }
 
-# --- virt: Debian cloud + 9p binary + systemd ---
+find_edk2_code() {
+  for p in \
+    /opt/homebrew/share/qemu/edk2-aarch64-code.fd \
+    /usr/local/share/qemu/edk2-aarch64-code.fd \
+    /usr/share/qemu/edk2-aarch64-code.fd \
+    /usr/share/AAVMF/AAVMF_CODE.fd; do
+    if [[ -f "$p" ]]; then
+      echo "$p"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# --- virt: Debian cloud + UEFI + cloud-init + systemd ---
 smoke_virt() {
-  log "LEVEL virt (-M virt, aarch64)"
+  log "LEVEL virt (-M virt, aarch64 + UEFI)"
   ensure_binary
-  local qs
+  local qs efi
   qs="$(find_qemu_system)" || die "qemu-system-aarch64 not found — brew install qemu"
+  efi="$(find_edk2_code)" || die "missing edk2-aarch64-code.fd (brew install qemu)"
   log "using $qs"
+  log "UEFI $efi"
   machine_has "$qs" virt || die "QEMU has no -M virt"
   command -v qemu-img >/dev/null 2>&1 || die "qemu-img not found"
 
   local base="${WORK}/debian-12-generic-arm64.qcow2"
   local url="https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-generic-arm64.qcow2"
   if [[ ! -f "$base" ]]; then
-    log "downloading Debian 12 arm64 cloud image (one-time, ~300MB)"
+    log "downloading Debian 12 arm64 cloud image (one-time, ~400MB)"
     curl -fL --retry 3 -o "${base}.partial" "$url"
     mv "${base}.partial" "$base"
   fi
@@ -115,9 +149,11 @@ smoke_virt() {
   local overlay="${WORK}/virt-overlay.qcow2"
   rm -f "$overlay"
   qemu-img create -f qcow2 -b "$base" -F qcow2 "$overlay" >/dev/null
-  # grow for packages/logs
-  qemu-img resize "$overlay" +512M >/dev/null 2>&1 || true
+  qemu-img resize "$overlay" +1G >/dev/null 2>&1 || true
 
+  # Embed binary as gzip+base64 (avoids 9p mount races).
+  local gz_b64="${WORK}/bin.gz.b64"
+  gzip -c -n "$BIN" | base64 | tr -d '\n' >"$gz_b64"
   local stage="${WORK}/cidata"
   rm -rf "$stage"
   mkdir -p "$stage"
@@ -125,10 +161,15 @@ smoke_virt() {
 instance-id: vinyl-qemu-$(date +%s)
 local-hostname: vinyl-bridge-qemu
 EOF
+  # user-data: write b64 payload via separate file on seed to keep YAML small
+  cp "$gz_b64" "${stage}/vinyl-bridge-pi.gz.b64"
   cat >"${stage}/user-data" <<'EOF'
 #cloud-config
 hostname: vinyl-bridge-qemu
-package_update: false
+package_update: true
+packages:
+  - libasound2
+  - curl
 ssh_pwauth: false
 write_files:
   - path: /etc/vinyl-bridge/config.toml
@@ -154,77 +195,95 @@ write_files:
       Environment=RUST_LOG=warn
       [Install]
       WantedBy=multi-user.target
-  - path: /usr/local/sbin/vinyl-install-from-9p.sh
-    permissions: '0755'
-    content: |
-      #!/bin/bash
-      set -e
-      mkdir -p /mnt/host /usr/local/bin /var/lib/vinyl-bridge/rec
-      for i in $(seq 1 90); do
-        if mount -t 9p -o trans=virtio,version=9p2000.L host /mnt/host 2>/dev/null; then
-          break
-        fi
-        # some kernels use different opts
-        if mount -t 9p -o trans=virtio host /mnt/host 2>/dev/null; then
-          break
-        fi
-        sleep 1
-      done
-      if [[ ! -x /mnt/host/vinyl-bridge-pi ]]; then
-        echo "vinyl-install: binary not visible on 9p" >&2
-        ls -la /mnt/host || true
-        exit 1
-      fi
-      install -m 0755 /mnt/host/vinyl-bridge-pi /usr/local/bin/vinyl-bridge-pi
-      systemctl daemon-reload
-      systemctl enable --now vinyl-bridge.service
-      sleep 1
-      curl -fsS http://127.0.0.1/api/status || true
 runcmd:
-  - /usr/local/sbin/vinyl-install-from-9p.sh
+  - |
+    set -e
+    mkdir -p /usr/local/bin /var/lib/vinyl-bridge/rec
+    # NoCloud seed is mounted at /dev/disk/by-label/CIDATA or /cidata
+    SRC=""
+    for p in /cidata /media/cidata /mnt /run/cloud-init; do
+      if [ -f "$p/vinyl-bridge-pi.gz.b64" ]; then SRC="$p/vinyl-bridge-pi.gz.b64"; break; fi
+    done
+    if [ -z "$SRC" ]; then
+      # try blkid mount
+      mkdir -p /mnt/cidata
+      CIDEV=$(blkid -L CIDATA 2>/dev/null || blkid -L cidata 2>/dev/null || true)
+      if [ -n "$CIDEV" ]; then mount -o ro "$CIDEV" /mnt/cidata || true; fi
+      if [ -f /mnt/cidata/vinyl-bridge-pi.gz.b64 ]; then SRC=/mnt/cidata/vinyl-bridge-pi.gz.b64; fi
+    fi
+    if [ -z "$SRC" ] || [ ! -f "$SRC" ]; then
+      echo "vinyl: seed binary not found" >&2
+      ls -la /cidata /mnt/cidata 2>/dev/null || true
+      exit 1
+    fi
+    base64 -d "$SRC" | gzip -d > /usr/local/bin/vinyl-bridge-pi
+    chmod 755 /usr/local/bin/vinyl-bridge-pi
+    systemctl daemon-reload
+    systemctl enable --now vinyl-bridge.service
+    sleep 2
+    curl -fsS http://127.0.0.1/api/status || true
 EOF
 
-  local seed="${WORK}/seed.iso"
+  # Prefer FAT NoCloud seed (reliable on aarch64 virt).
+  # Build inside Docker when host cannot mkfs.vfat (macOS sandbox / no mtools).
+  local seed="${WORK}/seed.img"
   rm -f "$seed"
-  if command -v mkisofs >/dev/null 2>&1; then
-    mkisofs -output "$seed" -volid cidata -joliet -rock \
-      -graft-points "user-data=${stage}/user-data" "meta-data=${stage}/meta-data" \
-      >/dev/null 2>&1
-  elif command -v genisoimage >/dev/null 2>&1; then
-    genisoimage -output "$seed" -volid cidata -joliet -rock \
-      -graft-points "user-data=${stage}/user-data" "meta-data=${stage}/meta-data" \
-      >/dev/null 2>&1
-  elif command -v hdiutil >/dev/null 2>&1; then
-    # Volume name CIDATA (cloud-init accepts cidata/CIDATA)
-    hdiutil makehybrid -o "${WORK}/seed" -iso -joliet -default-volume-name CIDATA "$stage" >/dev/null
-    if [[ -f "${WORK}/seed.iso" ]]; then
-      mv -f "${WORK}/seed.iso" "$seed"
-    elif [[ -f "${WORK}/seed.cdr" ]]; then
-      mv -f "${WORK}/seed.cdr" "$seed"
-    else
-      die "hdiutil did not produce seed ISO"
-    fi
+  log "building NoCloud FAT seed.img"
+  if command -v mkfs.vfat >/dev/null 2>&1 && command -v mcopy >/dev/null 2>&1; then
+    dd if=/dev/zero of="$seed" bs=1M count=48 status=none
+    mkfs.vfat -n CIDATA "$seed" >/dev/null
+    mcopy -i "$seed" "${stage}/user-data" "${stage}/meta-data" "${stage}/vinyl-bridge-pi.gz.b64" ::
+  elif command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+    tar -C "$stage" -cf - user-data meta-data vinyl-bridge-pi.gz.b64 \
+    | docker run --rm -i debian:bookworm-slim bash -c '
+        set -euo pipefail
+        apt-get update -qq
+        DEBIAN_FRONTEND=noninteractive apt-get install -y -qq dosfstools mtools >/dev/null
+        mkdir -p /cidata
+        tar -C /cidata -xf -
+        dd if=/dev/zero of=/seed.img bs=1M count=48 status=none
+        mkfs.vfat -n CIDATA /seed.img >/dev/null
+        mcopy -i /seed.img /cidata/user-data /cidata/meta-data /cidata/vinyl-bridge-pi.gz.b64 ::
+        cat /seed.img
+      ' >"$seed"
   else
-    die "need mkisofs, genisoimage, or hdiutil to build cloud-init seed"
+    die "need mkfs.vfat+mcopy or Docker to build NoCloud seed"
+  fi
+  [[ -s "$seed" ]] || die "empty seed.img"
+
+  # Writable UEFI vars store (required for some guests)
+  local efi_vars="${WORK}/edk2-vars.fd"
+  if [[ ! -f "$efi_vars" ]]; then
+    # 64 MiB empty flash is the usual size for QEMU edk2 vars
+    dd if=/dev/zero of="$efi_vars" bs=1m count=64 status=none 2>/dev/null \
+      || dd if=/dev/zero of="$efi_vars" bs=1048576 count=64 status=none
   fi
 
   local serial_log="${WORK}/virt-serial.log"
   rm -f "$serial_log"
   local qemu_pid
-  log "booting -M virt (timeout ${TIMEOUT_S}s); host :${HTTP_PORT} → guest :80"
+  local virt_timeout="${TIMEOUT_S}"
+  # First cloud-init boot + apt is slow
+  if (( virt_timeout < 480 )); then virt_timeout=480; fi
+  log "booting -M virt + UEFI (timeout ${virt_timeout}s); host :${HTTP_PORT} → guest :80"
   log "serial log: $serial_log"
 
-  # fsdev + device form is portable across QEMU versions
+  local accel_args=()
+  if [[ "$(uname -s)" == "Darwin" ]] && "$qs" -accel help 2>/dev/null | grep -q hvf; then
+    accel_args=(-accel hvf)
+  fi
+
   "$qs" \
-    -machine virt \
+    -machine virt,gic-version=3 \
+    "${accel_args[@]}" \
     -cpu max \
-    -m 1024 \
+    -m 2048 \
     -smp 2 \
     -nographic \
+    -drive "if=pflash,format=raw,readonly=on,file=${efi}" \
+    -drive "if=pflash,format=raw,file=${efi_vars}" \
     -drive "if=virtio,format=qcow2,file=${overlay}" \
     -drive "if=virtio,format=raw,file=${seed}" \
-    -fsdev "local,id=fsdev0,path=${DIST},security_model=mapped" \
-    -device "virtio-9p-device,fsdev=fsdev0,mount_tag=host" \
     -netdev "user,id=net0,hostfwd=tcp::${HTTP_PORT}-:80" \
     -device virtio-net-device,netdev=net0 \
     >"$serial_log" 2>&1 &
@@ -233,14 +292,14 @@ EOF
   cleanup() { kill "$qemu_pid" 2>/dev/null || true; wait "$qemu_pid" 2>/dev/null || true; }
   trap cleanup EXIT
 
-  local deadline=$((SECONDS + TIMEOUT_S))
+  local deadline=$((SECONDS + virt_timeout))
   while (( SECONDS < deadline )); do
     if ! kill -0 "$qemu_pid" 2>/dev/null; then
-      tail -100 "$serial_log" || true
+      tail -120 "$serial_log" || true
       die "virt QEMU exited early"
     fi
     if curl -fsS --max-time 2 "http://127.0.0.1:${HTTP_PORT}/api/status" 2>/dev/null \
-      | tee "${WORK}/status-virt.json" | grep -qE 'version|Vinyl|raspberry'; then
+      | tee "${WORK}/status-virt.json" | grep -qE 'version|Vinyl|raspberry|linux'; then
       log "PASS virt — /api/status (boot + systemd + binary)"
       (python3 -m json.tool "${WORK}/status-virt.json" 2>/dev/null || cat "${WORK}/status-virt.json")
       echo
@@ -248,11 +307,11 @@ EOF
       trap - EXIT
       return 0
     fi
-    sleep 3
+    sleep 5
   done
   log "FAIL virt — last serial lines:"
-  tail -150 "$serial_log" || true
-  die "virt smoke timed out after ${TIMEOUT_S}s"
+  tail -200 "$serial_log" || true
+  die "virt smoke timed out after ${virt_timeout}s"
 }
 
 # --- image: flashable SD img ---

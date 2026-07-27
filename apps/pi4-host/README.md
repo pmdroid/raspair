@@ -102,33 +102,59 @@ default `vinyl-bridge.local`.
 
 ---
 
-## Flashable SD card path
+## Flash path (validated binary)
 
-**Do not call the image flash-ready until QEMU smoke is green** (or hardware
-boot is confirmed). The recipe alone only *assembles* an image.
+**Validated 2026-07-27** (see [`STATUS.md`](STATUS.md)):
 
-### 1) Build the aarch64 binary
+| Step | Command | Result |
+|---|---|---|
+| aarch64 + ALSA binary | `make build-pi` | **PASS** — `dist/vinyl-bridge-pi` ELF aarch64 |
+| Binary smoke | `./scripts/qemu-smoke.sh binary` | **PASS** — `/api/status` on linux/arm64 |
+| Boot + systemd smoke | `./scripts/qemu-smoke.sh virt` | **PASS** — UEFI `-M virt` + unit + HTTP |
 
-On macOS/x86_64 (Docker required):
+QEMU does **not** prove real line-in, Wi‑Fi RF, or AirPlay→HomePod.
+
+### End-to-end: build → smoke → flash
 
 ```bash
 cd apps/pi4-host
-./scripts/build-release.sh
-# → dist/vinyl-bridge-pi  (ELF aarch64, ALSA enabled)
-```
 
-On a Pi or aarch64 Linux host the same script builds natively.
+# 1) Pi deploy binary (Docker linux/arm64 + ALSA)
+make build-pi
+# → dist/vinyl-bridge-pi
 
-### 2) Assemble the image (Linux or Docker)
+# 2) QEMU gates (binary + virt)
+make qemu-smoke
+# or: ./scripts/qemu-smoke.sh binary && ./scripts/qemu-smoke.sh virt
 
-```bash
-# From a Linux machine with loop mounts, or Docker --privileged:
+# 3) Assemble flashable Pi OS Lite image (Linux or privileged Docker)
 ./deploy/image/build-sd-image.sh
 # → dist/vinyl-bridge-pi4.img
 # → dist/vinyl-bridge-pi4.img.xz
+
+# 4) Flash
+# Raspberry Pi Imager → Use custom → vinyl-bridge-pi4.img
+# or:
+#   xzcat dist/vinyl-bridge-pi4.img.xz | sudo dd of=/dev/rdiskN bs=4m status=progress
 ```
 
-macOS example (privileged container):
+### 1) Build the aarch64 binary
+
+```bash
+make build-pi
+# same as: ./scripts/build-release.sh
+# → dist/vinyl-bridge-pi  (ELF aarch64, ALSA, stripped ~2.9 MiB)
+```
+
+Sources are streamed into Docker via **tar** (avoids flaky bind mounts on external disks).
+
+### 2) Assemble the SD image (Linux / privileged Docker)
+
+```bash
+./deploy/image/build-sd-image.sh
+```
+
+macOS (privileged container; needs loop mounts):
 
 ```bash
 docker run --privileged --rm \
@@ -138,69 +164,43 @@ docker run --privileged --rm \
     && ./deploy/image/build-sd-image.sh'
 ```
 
-The recipe:
+Recipe: Pi OS Lite arm64 → install `dist/vinyl-bridge-pi` + systemd unit + config → enable SSH → write `dist/vinyl-bridge-pi4.img(.xz)`.
 
-1. Downloads **Raspberry Pi OS Lite arm64**
-2. Loop-mounts boot + root
-3. Installs `vinyl-bridge-pi` → `/usr/local/bin/`
-4. Installs config → `/etc/vinyl-bridge/config.toml`
-5. Enables `vinyl-bridge.service`
-6. Enables SSH (`/boot/firmware/ssh` or `/boot/ssh`)
-7. Writes `dist/vinyl-bridge-pi4.img(.xz)`
-
-### 3) QEMU smoke (prefer before flashing)
-
-Install QEMU 8+ (`brew install qemu` on macOS; `apt install qemu-system-arm` on Debian).
+### 3) QEMU smoke
 
 ```bash
-cd apps/pi4-host
-
-# Fast: aarch64 binary under Docker linux/arm64 → curl /api/status
-./scripts/qemu-smoke.sh binary
-
-# Boot path: Debian arm64 cloud on -M virt + systemd unit + binary via 9p
-./scripts/qemu-smoke.sh virt
-
-# Full SD image (needs dist/vinyl-bridge-pi4.img + QEMU with raspi4b)
-./scripts/qemu-smoke.sh image
-
-# binary + virt (+ image if present)
-./scripts/qemu-smoke.sh all
+# Install: brew install qemu   (needs edk2-aarch64-code.fd for virt)
+./scripts/qemu-smoke.sh binary   # Docker arm64 + libasound2
+./scripts/qemu-smoke.sh virt     # -M virt + UEFI + cloud-init + systemd
+./scripts/qemu-smoke.sh image    # optional: full SD img + -M raspi4b if present
 ```
 
-#### Manual QEMU commands (reference)
+#### Manual QEMU reference
 
-**A) Binary-only (Docker multiarch — no full OS boot):**
+**Binary (prefer `qemu-smoke.sh binary` — uses docker cp + libasound2):**
 
 ```bash
-docker run --rm --platform linux/arm64 -p 18080:8080 \
-  -v "$PWD/dist/vinyl-bridge-pi:/vinyl-bridge-pi:ro" \
-  debian:bookworm-slim \
-  /vinyl-bridge-pi --http-bind 0.0.0.0:8080
-# other terminal:
-curl -s http://127.0.0.1:18080/api/status
+# see scripts/qemu-smoke.sh smoke_binary()
 ```
 
-**B) System emulation — `-M virt` (widely available):**
+**Virt + UEFI (shape used by the script):**
 
 ```bash
-# After qemu-smoke prepares overlay/seed, equivalent shape:
 qemu-system-aarch64 \
-  -machine virt -cpu max -m 1024 -smp 2 -nographic \
+  -machine virt,gic-version=3 -cpu max -m 2048 -smp 2 -nographic \
+  -drive if=pflash,format=raw,readonly=on,file=/opt/homebrew/share/qemu/edk2-aarch64-code.fd \
+  -drive if=pflash,format=raw,file=dist/qemu-work/edk2-vars.fd \
   -drive if=virtio,format=qcow2,file=dist/qemu-work/virt-overlay.qcow2 \
-  -drive if=virtio,format=raw,file=dist/qemu-work/seed.iso \
-  -fsdev local,id=fsdev0,path=$PWD/dist,security_model=mapped \
-  -device virtio-9p-device,fsdev=fsdev0,mount_tag=host \
+  -drive if=virtio,format=raw,file=dist/qemu-work/seed.img \
   -netdev user,id=net0,hostfwd=tcp::18080-:80 \
   -device virtio-net-device,netdev=net0
 ```
 
-**C) Pi 4 machine model — `-M raspi4b` (when your QEMU lists it):**
+**Pi 4 model (`-M raspi4b`) — after assembling the SD image:**
 
 ```bash
 qemu-system-aarch64 -machine help | grep raspi4b
-
-# kernel8.img + bcm2711-rpi-4-b.dtb from the image boot partition:
+# extract kernel8.img + bcm2711-rpi-4-b.dtb from boot partition, then:
 qemu-system-aarch64 \
   -machine raspi4b -cpu cortex-a72 -m 2048 -nographic \
   -kernel kernel8.img -dtb bcm2711-rpi-4-b.dtb \
@@ -210,33 +210,25 @@ qemu-system-aarch64 \
   -netdev user,id=net0,hostfwd=tcp::18080-:80
 ```
 
-| What QEMU proves | What it does **not** prove |
+| QEMU proves | QEMU does **not** prove |
 |---|---|
-| aarch64 binary runs | Real WM8782/USB line-in quality |
-| systemd unit starts (virt) | Wi‑Fi / mDNS on real RF |
-| HTTP `/api/status` | AirPlay → HomePod (still stub) |
-| raspi4b boots SD image (if machine exists) | Full USB audio / HAT passthrough |
+| aarch64 binary runs | Real line-in quality |
+| systemd unit starts (virt) | Wi‑Fi / mDNS on RF |
+| HTTP `/api/status` | AirPlay → HomePod (stub) |
 
-If `raspi4b` is missing, treat **virt + binary** as the gate for “image recipe is sane”; still do a hardware flash before shipping cards.
+### 4) Flash the card
 
-### 4) Flash the card (after smoke)
+**Raspberry Pi Imager:** OS → **Use custom** → `dist/vinyl-bridge-pi4.img` → set Wi‑Fi/user → Write.
 
-**Raspberry Pi Imager (recommended)**
-
-1. Choose OS → **Use custom** → select `dist/vinyl-bridge-pi4.img` (decompress `.xz` first if needed)
-2. Optional: set Wi‑Fi, user, locale in Imager’s gear menu
-3. Write to the microSD card
-4. Insert into Pi 4, power on
-
-**dd (macOS)**
+**dd (macOS):**
 
 ```bash
-# diskutil list   → note the raw disk, e.g. /dev/rdisk4  (NOT a partition)
+# diskutil list  → raw disk e.g. /dev/rdisk4 (NOT a partition)
 xzcat dist/vinyl-bridge-pi4.img.xz | sudo dd of=/dev/rdiskN bs=4m status=progress
 diskutil eject /dev/diskN
 ```
 
-**dd (Linux)**
+**dd (Linux):**
 
 ```bash
 xzcat dist/vinyl-bridge-pi4.img.xz | sudo dd of=/dev/sdX bs=4M status=progress conv=fsync
@@ -244,22 +236,18 @@ xzcat dist/vinyl-bridge-pi4.img.xz | sudo dd of=/dev/sdX bs=4M status=progress c
 
 ### 5) First boot
 
-1. Ethernet (or preconfigured Wi‑Fi via Imager)
-2. SSH: `ssh vinyl@vinyl-bridge.local` (or the user you set in Imager)
-3. Check service:
-
 ```bash
+ssh <user>@vinyl-bridge.local   # or Imager user / Ethernet IP
 sudo systemctl status vinyl-bridge
 curl -s http://vinyl-bridge.local/api/status
+# set capture_device from `arecord -l` in /etc/vinyl-bridge/config.toml
+sudo systemctl restart vinyl-bridge
 ```
 
-4. Point line-in at the ALSA device in `/etc/vinyl-bridge/config.toml`
-   (`arecord -l`), then `sudo systemctl restart vinyl-bridge`.
-
-### Alternative: update a running Pi without re-flashing
+### Alternative: update a running Pi (no re-flash)
 
 ```bash
-./scripts/build-release.sh
+make build-pi
 ./scripts/install-on-running-pi.sh vinyl@192.168.x.y
 ```
 
