@@ -1,7 +1,8 @@
 /target/
 /dist/
 **/*.rs.bk
-config.toml
+# Local runtime config only (keep Buildroot overlay config.toml tracked)
+/config.toml
 .idea/
 .vscode/
 

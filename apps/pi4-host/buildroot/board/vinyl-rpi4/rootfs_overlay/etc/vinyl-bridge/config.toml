@@ -1,0 +1,23 @@
+# Vinyl Bridge appliance defaults (Buildroot rootfs overlay).
+# Edit on-device after first boot; rebuild image for fleet defaults.
+
+device_name = "Vinyl Bridge"
+http_bind = "0.0.0.0:80"
+mdns_hostname = "vinyl-bridge"
+
+# ALSA capture — set after `arecord -l` on the Pi (USB ADC / I2S HAT).
+capture_device = "default"
+sample_rate = 48000
+channels = 2
+bits = 24
+
+record_dir = "/var/lib/vinyl-bridge/rec"
+record_min_free_bytes = 16777216
+
+audio_start_threshold_db = -45.0
+audio_start_hold_ms = 250
+audio_stop_threshold_db = -52.0
+audio_stop_timeout_sec = 15
+
+volume_db = -30.0
+force_open = false
