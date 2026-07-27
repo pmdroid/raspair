@@ -92,7 +92,17 @@ make -C "$BR_DIR" \
   vinyl_rpi4_64_defconfig
 
 # --- build ---
-log "building (jobs=$JOBS) — first run downloads toolchain/kernel and can take 30–90+ min"
+# glibc has a known parallel-make race (missing stdlib/stamp.os) on some Docker
+# hosts (notably aarch64). Build toolchain serially first, then finish parallel.
+log "building toolchain serially (glibc race workaround), then -j$JOBS"
+make -C "$BR_DIR" \
+  O="$OUTPUT_DIR" \
+  BR2_EXTERNAL="$EXTERNAL" \
+  BR2_DL_DIR="$DL_DIR" \
+  -j1 \
+  toolchain
+
+log "building remaining packages (jobs=$JOBS) — first full run can take 30–90+ min"
 make -C "$BR_DIR" \
   O="$OUTPUT_DIR" \
   BR2_EXTERNAL="$EXTERNAL" \

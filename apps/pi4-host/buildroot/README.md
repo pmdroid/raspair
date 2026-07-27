@@ -79,6 +79,10 @@ ls -lh "$O/images/sdcard.img"
 First build downloads a toolchain, kernel, and firmware — often **30–90+ minutes**
 depending on CPU and network. Rebuilds are incremental.
 
+`deploy/buildroot/build.sh` builds the **toolchain serially** first (avoids a
+known glibc parallel `stamp.os` race under Docker/aarch64), then finishes the
+rest with `JOBS` (default: nproc).
+
 ## Flash
 
 **Raspberry Pi Imager:** OS → Use custom → `vinyl-bridge-pi4.img` → Write.  
