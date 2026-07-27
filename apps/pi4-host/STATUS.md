@@ -1,7 +1,7 @@
 # pi4-host — live status (Kyoto / Telegram pings)
 
 **Branch:** `feat/pi4-linux-host`  
-**Tip (pushed):** see `git rev-parse HEAD` after latest push  
+**Tip (pushed):** `65eb5a2efa9b736ca0d9295f1e64ddfe2ca69b6f`  
 **Last update (UTC):** 2026-07-27  
 **Base OS (deploy image):** **Buildroot** (busybox init) — **not** Raspberry Pi OS
 
