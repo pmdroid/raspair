@@ -3,15 +3,21 @@
 //! Same control surface as `apps/p4-bridge` (HTTP API, mDNS, capture gate,
 //! record, session manager). AirPlay 2 / Chromecast protocol stacks are
 //! scaffolded as stubs until ported from `apps/firmware/components/airplay2`.
+//!
+//! Management: settings, auto-record (energy gate), music ID (AcoustID),
+//! collection tags, and embedded web UI at `/`.
 
 mod airplay;
 mod capture;
 mod chromecast;
+mod collection;
 mod config;
 mod control;
 mod mdns_svc;
+mod music_id;
 mod record;
 mod session;
+mod settings;
 mod stats;
 mod webapi;
 
@@ -22,6 +28,7 @@ use crate::control::{ControlState, SpeakerTarget, TargetType};
 use crate::mdns_svc::MdnsHub;
 use crate::record::Recorder;
 use crate::session::SessionRuntime;
+use crate::settings::SettingsStore;
 use crate::stats::Stats;
 use crate::webapi::AppState;
 use anyhow::{Context, Result};
@@ -67,12 +74,23 @@ async fn main() -> Result<()> {
     if let Some(bind) = cli.http_bind {
         cfg.http_bind = bind;
     }
+    // Env override for AcoustID when not in TOML
+    if cfg.acoustid_api_key.is_empty() {
+        if let Ok(k) = std::env::var("ACOUSTID_API_KEY") {
+            cfg.acoustid_api_key = k;
+        }
+    }
+
+    let settings = SettingsStore::new(&cfg);
+    let snap = settings.get();
 
     tracing::info!(
         version = env!("CARGO_PKG_VERSION"),
-        device = %cfg.device_name,
+        device = %snap.device_name,
         bind = %cfg.http_bind,
         capture = %cfg.capture_device,
+        auto_record = snap.auto_record,
+        music_id_ready = snap.music_id_ready,
         "vinyl-bridge-pi starting"
     );
 
@@ -81,7 +99,7 @@ async fn main() -> Result<()> {
         .iter()
         .map(target_from_cfg)
         .collect();
-    let control = ControlState::new(cfg.volume_db, initial_targets);
+    let control = ControlState::new(snap.volume_db, initial_targets);
     let capture = capture::start(&cfg);
     let recorder = Recorder::new(&cfg);
     let stats = Arc::new(Stats::new());
@@ -89,7 +107,7 @@ async fn main() -> Result<()> {
     let chromecast = Arc::new(ChromecastManager::new());
 
     let http_port = parse_port(&cfg.http_bind).unwrap_or(80);
-    let mdns = MdnsHub::start(&cfg.mdns_hostname, &cfg.device_name, http_port)
+    let mdns = MdnsHub::start(&cfg.mdns_hostname, &snap.device_name, http_port)
         .context("mDNS start")?;
 
     let state = AppState {
@@ -101,6 +119,7 @@ async fn main() -> Result<()> {
         mdns,
         airplay: airplay.clone(),
         chromecast: chromecast.clone(),
+        settings: settings.clone(),
     };
 
     let rt = SessionRuntime {
@@ -110,7 +129,7 @@ async fn main() -> Result<()> {
         chromecast,
         recorder,
         stats,
-        cfg: cfg.clone(),
+        settings,
     };
     tokio::spawn(session::run(rt));
 
@@ -122,7 +141,7 @@ async fn main() -> Result<()> {
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .with_context(|| format!("bind {addr}"))?;
-    tracing::info!(%addr, "HTTP API listening");
+    tracing::info!(%addr, "HTTP API + web UI listening");
     axum::serve(listener, app).await?;
     Ok(())
 }

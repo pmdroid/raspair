@@ -80,20 +80,63 @@ make build-pi             # or: just build-pi
 # → dist/vinyl-bridge-pi
 ```
 
-## HTTP API (parity with p4-bridge)
+## Web management UI
+
+Open **`http://127.0.0.1:8080/`** (macOS loop) or **`http://vinyl-bridge.local/`**
+on the appliance. Embedded SPA (`static/index.html`):
+
+- Settings (gate thresholds, auto-record, music ID key)
+- Speaker scan / select / play / stop / volume
+- Start/stop session record to filesystem; list + download WAVs
+- Collection tags (artist/title from AcoustID when configured)
+
+Full smoke notes: [`docs/MANAGEMENT-API.md`](docs/MANAGEMENT-API.md).
+
+### Record path
+
+| Environment | `record_dir` |
+|---|---|
+| macOS default | `./rec` |
+| Pi / Buildroot | `/var/lib/vinyl-bridge/rec` |
+| Override | TOML `record_dir` or `GET /api/settings` |
+
+### Music ID (optional)
+
+```bash
+# 1) Chromaprint fingerprint tool
+brew install chromaprint          # provides fpcalc
+# export FPCALC_PATH=/opt/homebrew/bin/fpcalc
+
+# 2) AcoustID client key — https://acoustid.org/new-application
+export ACOUSTID_API_KEY=your_client_key
+
+# 3) Enable in config or UI
+# music_id_enabled = true
+# acoustid_api_key = "…"
+```
+
+Without `fpcalc` or a key, recording still works; identify degrades to
+`skipped` / `disabled` and writes a JSON sidecar.
+
+## HTTP API (parity with p4-bridge + management)
 
 | Method | Path | Notes |
 |---|---|---|
+| GET | `/` or `/ui` | **Web management UI** |
 | GET | `/api/status` | name, streaming, volume, targets, record, parity flags |
 | GET | `/api/speakers` | mDNS browse cache (`_airplay` / `_googlecast`) |
-| POST | `/api/select` | `{ "speakers": [ ... ] }` |
-| POST | `/api/play` / `/api/stop` | session intent |
+| POST | `/api/select` | `{ "speakers": [ ... ] }` → full status |
+| POST | `/api/play` / `/api/stop` | session intent → full status |
 | POST | `/api/volume` | `{ "db": -30.0 }` |
+| GET/PUT | `/api/settings` | runtime settings (persist `settings.json`) |
 | GET/POST | `/api/record*` | WAV under `record_dir` |
+| POST | `/api/record/identify` | `{ "file": "rec-….wav" }` AcoustID (graceful) |
+| GET | `/api/collection` | tagged library listing |
 | GET | `/api/stats` | uptime + counters |
 | GET | `/api/ota` | unsupported — rebuild Buildroot image / SCP binary |
 
 Android discovery: mDNS **`_vinylbridge._tcp`**, hostname **`vinyl-bridge.local`**.
+Android Settings + Recordings screens use the same API (auto-record, identify).
 
 ---
 

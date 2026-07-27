@@ -31,6 +31,24 @@ volume_db = -30.0
 # Useful for bring-up without a turntable connected.
 force_open = false
 
+# Auto-start/stop WAV recording when the energy gate opens/closes
+# (silence → music → silence). Manual /api/record/* still works.
+auto_record = false
+
+# Silence-split multi-track mode for armed sessions (per-song WAVs).
+record_auto_split = false
+# track_start_threshold_db = -45.0
+# track_start_hold_ms = 300
+# track_stop_threshold_db = -55.0
+# track_stop_hold_ms = 2500
+
+# After a recording finalizes, try Chromaprint (fpcalc) + AcoustID.
+# Graceful degrade if fpcalc or key is missing. Key can also be set via
+# ACOUSTID_API_KEY env, or at runtime via PUT /api/settings / web UI.
+music_id_enabled = false
+acoustid_api_key = ""
+# FPCALC_PATH=/usr/bin/fpcalc   # optional override (env, not TOML)
+
 # Optional fixed targets (overridden by POST /api/select from Android).
 # [[targets]]
 # name = "Living Room"
@@ -38,3 +56,10 @@ force_open = false
 # device_id = "AA:BB:CC:DD:EE:FF"
 # port = 7000
 # type = "airplay"   # or "chromecast"
+
+# Silence-split multi-track (when start has no filename and this is true).
+record_auto_split = false
+# track_start_threshold_db = -45.0
+# track_start_hold_ms = 300
+# track_stop_threshold_db = -55.0
+# track_stop_hold_ms = 2500

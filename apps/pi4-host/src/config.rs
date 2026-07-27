@@ -36,6 +36,32 @@ pub struct Config {
     pub volume_db: f32,
     #[serde(default)]
     pub force_open: bool,
+    /// Auto-start/stop WAV recording when the energy gate opens/closes.
+    #[serde(default)]
+    pub auto_record: bool,
+    /// Attempt AcoustID identification after a recording finalizes.
+    #[serde(default)]
+    pub music_id_enabled: bool,
+    /// AcoustID client API key (also overridable via ACOUSTID_API_KEY).
+    #[serde(default)]
+    pub acoustid_api_key: String,
+    /// Silence-split multi-track mode for record sessions.
+    #[serde(default)]
+    pub record_auto_split: bool,
+    #[serde(default = "default_track_start_threshold")]
+    pub track_start_threshold_db: f64,
+    #[serde(default = "default_track_start_hold")]
+    pub track_start_hold_ms: u64,
+    #[serde(default = "default_track_stop_threshold")]
+    pub track_stop_threshold_db: f64,
+    #[serde(default = "default_track_stop_hold")]
+    pub track_stop_hold_ms: u64,
+    #[serde(default = "default_track_preroll")]
+    pub track_preroll_ms: u64,
+    #[serde(default = "default_track_tail")]
+    pub track_tail_ms: u64,
+    #[serde(default = "default_track_min_sec")]
+    pub track_min_sec: f64,
     #[serde(default)]
     pub targets: Vec<TargetConfig>,
 }
@@ -71,6 +97,17 @@ impl Default for Config {
             audio_stop_timeout_sec: default_stop_timeout(),
             volume_db: default_volume(),
             force_open: false,
+            auto_record: false,
+            music_id_enabled: false,
+            acoustid_api_key: String::new(),
+            record_auto_split: false,
+            track_start_threshold_db: default_track_start_threshold(),
+            track_start_hold_ms: default_track_start_hold(),
+            track_stop_threshold_db: default_track_stop_threshold(),
+            track_stop_hold_ms: default_track_stop_hold(),
+            track_preroll_ms: default_track_preroll(),
+            track_tail_ms: default_track_tail(),
+            track_min_sec: default_track_min_sec(),
             targets: Vec::new(),
         }
     }
@@ -95,6 +132,7 @@ impl Config {
             .with_context(|| format!("parse config {}", path.display()))?;
         Ok(cfg)
     }
+
 }
 
 fn default_device_name() -> String {
@@ -119,7 +157,6 @@ fn default_bits() -> u16 {
     24
 }
 fn default_record_dir() -> PathBuf {
-    // macOS daily loop: writable CWD path. Pi/systemd image uses /var/lib.
     if cfg!(target_os = "macos") {
         PathBuf::from("./rec")
     } else {
@@ -149,4 +186,25 @@ fn default_airplay_port() -> u16 {
 }
 fn default_target_type() -> String {
     "airplay".into()
+}
+fn default_track_start_threshold() -> f64 {
+    -45.0
+}
+fn default_track_start_hold() -> u64 {
+    300
+}
+fn default_track_stop_threshold() -> f64 {
+    -55.0
+}
+fn default_track_stop_hold() -> u64 {
+    2500
+}
+fn default_track_preroll() -> u64 {
+    400
+}
+fn default_track_tail() -> u64 {
+    300
+}
+fn default_track_min_sec() -> f64 {
+    2.0
 }

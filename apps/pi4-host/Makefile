@@ -41,10 +41,24 @@ build-macos-debug:
 
 test-macos: build-macos-debug
 	@pkill -x vinyl-bridge-pi 2>/dev/null || true
-	@./target/debug/vinyl-bridge-pi --http-bind $(HTTP_BIND) --log warn & \
+	@set -e; \
+	./target/debug/vinyl-bridge-pi --http-bind $(HTTP_BIND) --log warn & \
 		pid=$$!; \
-		sleep 1; \
+		for i in 1 2 3 4 5 6 7 8 9 10; do \
+			curl -fsS "http://$(HTTP_BIND)/api/status" >/dev/null 2>&1 && break; \
+			sleep 0.3; \
+		done; \
 		curl -fsS "http://$(HTTP_BIND)/api/status" | head -c 400; echo; \
+		curl -fsS "http://$(HTTP_BIND)/api/settings" | head -c 300; echo; \
+		curl -fsS -X PUT "http://$(HTTP_BIND)/api/settings" \
+			-H 'content-type: application/json' \
+			-d '{"auto_record":false}' | head -c 200; echo; \
+		curl -fsS -X POST "http://$(HTTP_BIND)/api/record/start" \
+			-H 'content-type: application/json' -d '{}' | head -c 200; echo; \
+		curl -fsS -X POST "http://$(HTTP_BIND)/api/record/stop" | head -c 200; echo; \
+		curl -fsS "http://$(HTTP_BIND)/api/record/files" | head -c 300; echo; \
+		curl -fsS "http://$(HTTP_BIND)/api/collection" | head -c 200; echo; \
+		curl -fsS "http://$(HTTP_BIND)/" | head -c 80; echo; \
 		kill $$pid 2>/dev/null || true; \
 		wait $$pid 2>/dev/null || true; \
 		echo "PASS test-macos"

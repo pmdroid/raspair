@@ -1,0 +1,472 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Vinyl Bridge</title>
+  <style>
+    :root {
+      --bg: #0f1115;
+      --panel: #1a1d24;
+      --border: #2a2f3a;
+      --text: #e8eaed;
+      --muted: #9aa0a6;
+      --accent: #c4a35a;
+      --good: #3dd68c;
+      --bad: #f07178;
+      --btn: #2b3240;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font: 15px/1.45 system-ui, -apple-system, Segoe UI, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+    }
+    header {
+      padding: 1rem 1.25rem;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      flex-wrap: wrap;
+      gap: .75rem;
+      align-items: center;
+      justify-content: space-between;
+    }
+    header h1 { margin: 0; font-size: 1.15rem; font-weight: 600; letter-spacing: .02em; }
+    header .meta { color: var(--muted); font-size: .9rem; }
+    main {
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 1rem;
+      display: grid;
+      gap: 1rem;
+    }
+    @media (min-width: 900px) {
+      main { grid-template-columns: 1fr 1fr; }
+      .span2 { grid-column: 1 / -1; }
+    }
+    section {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 1rem;
+    }
+    section h2 {
+      margin: 0 0 .75rem;
+      font-size: .95rem;
+      text-transform: uppercase;
+      letter-spacing: .06em;
+      color: var(--accent);
+    }
+    .row { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; margin-bottom: .5rem; }
+    label { color: var(--muted); font-size: .85rem; min-width: 7rem; }
+    input[type="text"], input[type="number"], input[type="password"] {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      color: var(--text);
+      border-radius: 6px;
+      padding: .4rem .55rem;
+      flex: 1;
+      min-width: 8rem;
+    }
+    input[type="range"] { flex: 1; }
+    button, .btn {
+      background: var(--btn);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: .45rem .75rem;
+      cursor: pointer;
+      font: inherit;
+    }
+    button.primary { background: #3a2f1a; border-color: var(--accent); color: var(--accent); }
+    button.danger { border-color: var(--bad); color: var(--bad); }
+    button:disabled { opacity: .45; cursor: not-allowed; }
+    .pill {
+      display: inline-block;
+      padding: .15rem .5rem;
+      border-radius: 999px;
+      font-size: .75rem;
+      border: 1px solid var(--border);
+      color: var(--muted);
+    }
+    .pill.on { border-color: var(--good); color: var(--good); }
+    .pill.off { border-color: var(--bad); color: var(--bad); }
+    ul.list { list-style: none; margin: 0; padding: 0; max-height: 280px; overflow: auto; }
+    ul.list li {
+      display: flex; flex-wrap: wrap; gap: .4rem; align-items: center;
+      padding: .45rem 0; border-bottom: 1px solid var(--border);
+    }
+    ul.list li:last-child { border-bottom: 0; }
+    .name { flex: 1; min-width: 8rem; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .85rem; }
+    .muted { color: var(--muted); font-size: .85rem; }
+    .err { color: var(--bad); font-size: .9rem; }
+    .ok { color: var(--good); }
+    .check { display: flex; align-items: center; gap: .4rem; }
+    table { width: 100%; border-collapse: collapse; font-size: .9rem; }
+    th, td { text-align: left; padding: .35rem .25rem; border-bottom: 1px solid var(--border); }
+    th { color: var(--muted); font-weight: 500; }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1 id="title">Vinyl Bridge</h1>
+      <div class="meta" id="sub">Connecting…</div>
+    </div>
+    <div class="row" style="margin:0">
+      <span class="pill" id="streamPill">stream</span>
+      <span class="pill" id="recPill">record</span>
+      <button id="btnRefresh">Refresh</button>
+    </div>
+  </header>
+  <main>
+    <section>
+      <h2>Connection</h2>
+      <div class="row">
+        <label for="host">API host</label>
+        <input id="host" type="text" placeholder="http://vinyl-bridge.local or leave blank for same origin" />
+        <button id="btnConnect" class="primary">Connect</button>
+      </div>
+      <p class="muted">Leave blank when this page is served by the bridge. Point at the Pi IP when developing the SPA separately.</p>
+      <div id="connErr" class="err"></div>
+    </section>
+
+    <section>
+      <h2>Status</h2>
+      <div class="row"><span class="muted">RMS</span> <strong id="rms">—</strong> dBFS</div>
+      <div class="row"><span class="muted">Volume</span>
+        <input id="vol" type="range" min="-30" max="0" value="-30" />
+        <span id="volLabel">-30 dB</span>
+      </div>
+      <div class="row">
+        <button id="btnPlay" class="primary">Play</button>
+        <button id="btnStop" class="danger">Stop</button>
+      </div>
+    </section>
+
+    <section class="span2">
+      <h2>Speakers</h2>
+      <div class="row">
+        <button id="btnScan">Scan</button>
+        <button id="btnSelect" class="primary">Play on selected</button>
+      </div>
+      <ul class="list" id="speakers"></ul>
+    </section>
+
+    <section>
+      <h2>Recording</h2>
+      <div class="row">
+        <span class="muted">Phase</span> <code id="recPhase">idle</code>
+        <span class="muted">Level</span> <code id="recLevel">—</code>
+      </div>
+      <div class="row">
+        <button id="btnRecStart" class="primary">Start record</button>
+        <button id="btnRecStop" class="danger">Stop</button>
+      </div>
+      <div class="row">
+        <label class="check"><input type="checkbox" id="autoRecord" /> Auto-record (energy gate)</label>
+      </div>
+      <div class="row">
+        <label class="check"><input type="checkbox" id="autoSplit" /> Silence track split (config default)</label>
+      </div>
+      <p class="muted">Files land on the Pi under the record directory. Download from the list below.</p>
+      <div class="row"><button id="btnFiles">Refresh files</button></div>
+      <ul class="list" id="files"></ul>
+    </section>
+
+    <section>
+      <h2>Collection / Music ID</h2>
+      <div class="row">
+        <label class="check"><input type="checkbox" id="musicId" /> Music ID enabled</label>
+        <span class="pill" id="idReady">AcoustID</span>
+      </div>
+      <div class="row">
+        <label for="acoustid">AcoustID key</label>
+        <input id="acoustid" type="password" placeholder="optional — set to enable fingerprint ID" />
+      </div>
+      <div class="row">
+        <input id="tagFile" type="text" placeholder="filename.wav" />
+      </div>
+      <div class="row">
+        <input id="tagArtist" type="text" placeholder="Artist" />
+        <input id="tagTitle" type="text" placeholder="Title" />
+      </div>
+      <div class="row">
+        <input id="tagAlbum" type="text" placeholder="Album" />
+        <button id="btnTag">Save tags</button>
+        <button id="btnIdentify" class="primary">Identify</button>
+      </div>
+      <table>
+        <thead><tr><th>File</th><th>Artist</th><th>Title</th><th>Status</th></tr></thead>
+        <tbody id="collection"></tbody>
+      </table>
+    </section>
+
+    <section class="span2">
+      <h2>Settings</h2>
+      <div class="row">
+        <label for="devName">Device name</label>
+        <input id="devName" type="text" />
+      </div>
+      <div class="row">
+        <label for="startDb">Gate start dB</label>
+        <input id="startDb" type="number" step="0.5" />
+        <label for="stopDb">Gate stop dB</label>
+        <input id="stopDb" type="number" step="0.5" />
+      </div>
+      <div class="row">
+        <label for="stopTo">Stop timeout s</label>
+        <input id="stopTo" type="number" step="1" />
+        <label class="check"><input type="checkbox" id="forceOpen" /> Force open</label>
+      </div>
+      <div class="row">
+        <button id="btnSaveSettings" class="primary">Save settings</button>
+        <span id="settingsMsg" class="muted"></span>
+      </div>
+    </section>
+  </main>
+  <script>
+    const $ = (id) => document.getElementById(id);
+    let base = localStorage.getItem('vinyl_host') || '';
+    $('host').value = base;
+
+    function apiUrl(path) {
+      const b = base.replace(/\/$/, '');
+      return b ? b + path : path;
+    }
+
+    async function api(path, opts = {}) {
+      const res = await fetch(apiUrl(path), {
+        headers: { 'Content-Type': 'application/json', ...(opts.headers || {}) },
+        ...opts,
+      });
+      const text = await res.text();
+      let data = null;
+      try { data = text ? JSON.parse(text) : null; } catch { data = { raw: text }; }
+      if (!res.ok) throw new Error((data && data.error) || res.status + ' ' + text);
+      return data;
+    }
+
+    function setPill(el, on, labelOn, labelOff) {
+      el.textContent = on ? labelOn : labelOff;
+      el.className = 'pill ' + (on ? 'on' : 'off');
+    }
+
+    let speakers = [];
+    let selected = new Set();
+
+    async function refreshStatus() {
+      $('connErr').textContent = '';
+      try {
+        const s = await api('/api/status');
+        $('title').textContent = s.name || 'Vinyl Bridge';
+        $('sub').textContent = `${s.platform || ''} · v${s.version || '?'} · ${base || location.origin}`;
+        setPill($('streamPill'), !!s.streaming, 'streaming', 'idle');
+        const rec = s.record || {};
+        setPill($('recPill'), !!rec.recording, 'recording', 'not recording');
+        $('rms').textContent = (s.rms_dbfs ?? 0).toFixed(1);
+        const vol = Math.round(s.volume_db ?? -30);
+        $('vol').value = vol;
+        $('volLabel').textContent = vol + ' dB';
+        $('recPhase').textContent = rec.phase || (rec.recording ? 'recording' : 'idle');
+        $('recLevel').textContent = rec.level_dbfs != null ? rec.level_dbfs.toFixed(1) + ' dB' : '—';
+        if (s.settings) {
+          $('autoRecord').checked = !!s.settings.auto_record;
+          $('musicId').checked = !!s.settings.music_id_enabled;
+          setPill($('idReady'), !!s.settings.music_id_ready, 'AcoustID ready', 'AcoustID not set');
+        }
+      } catch (e) {
+        $('connErr').textContent = e.message;
+      }
+    }
+
+    async function refreshSettings() {
+      try {
+        const s = await api('/api/settings');
+        $('devName').value = s.device_name || '';
+        $('startDb').value = s.audio_start_threshold_db ?? -45;
+        $('stopDb').value = s.audio_stop_threshold_db ?? -52;
+        $('stopTo').value = s.audio_stop_timeout_sec ?? 15;
+        $('forceOpen').checked = !!s.force_open;
+        $('autoRecord').checked = !!s.auto_record;
+        $('musicId').checked = !!s.music_id_enabled;
+        $('autoSplit').checked = !!s.record_auto_split;
+        setPill($('idReady'), !!s.music_id_ready, 'AcoustID ready', 'AcoustID not set');
+      } catch (e) {
+        $('settingsMsg').textContent = e.message;
+      }
+    }
+
+    async function scanSpeakers() {
+      const data = await api('/api/speakers');
+      speakers = data.speakers || [];
+      const ul = $('speakers');
+      ul.innerHTML = '';
+      if (!speakers.length) {
+        ul.innerHTML = '<li class="muted">No speakers discovered yet</li>';
+        return;
+      }
+      speakers.forEach((sp, i) => {
+        const li = document.createElement('li');
+        const id = sp.device_id || sp.ip + ':' + sp.port;
+        const cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.checked = selected.has(id);
+        cb.onchange = () => { if (cb.checked) selected.add(id); else selected.delete(id); };
+        const name = document.createElement('span');
+        name.className = 'name';
+        name.textContent = `${sp.name} · ${sp.ip}:${sp.port} · ${sp.type || 'airplay'}`;
+        li.append(cb, name);
+        ul.appendChild(li);
+        sp._selId = id;
+      });
+    }
+
+    async function refreshFiles() {
+      const data = await api('/api/record/files');
+      const ul = $('files');
+      ul.innerHTML = '';
+      const files = data.files || [];
+      if (!files.length) {
+        ul.innerHTML = '<li class="muted">No WAV files yet</li>';
+        return;
+      }
+      files.forEach(f => {
+        const li = document.createElement('li');
+        const name = document.createElement('span');
+        name.className = 'name';
+        name.textContent = f.name;
+        const meta = document.createElement('span');
+        meta.className = 'muted';
+        meta.textContent = `${(f.size/1e6).toFixed(2)} MB` + (f.artist || f.title ? ` · ${f.artist||'?'} — ${f.title||'?'}` : '');
+        const a = document.createElement('a');
+        a.className = 'btn';
+        a.textContent = 'Download';
+        a.href = apiUrl('/api/record/download?file=' + encodeURIComponent(f.name));
+        a.download = f.name;
+        const idBtn = document.createElement('button');
+        idBtn.textContent = 'ID';
+        idBtn.onclick = async () => {
+          $('tagFile').value = f.name;
+          await api('/api/record/identify', { method: 'POST', body: JSON.stringify({ file: f.name }) });
+          await refreshCollection();
+          await refreshFiles();
+        };
+        const tagBtn = document.createElement('button');
+        tagBtn.textContent = 'Tag';
+        tagBtn.onclick = () => {
+          $('tagFile').value = f.name;
+          $('tagArtist').value = f.artist || '';
+          $('tagTitle').value = f.title || '';
+          $('tagAlbum').value = f.album || '';
+        };
+        li.append(name, meta, a, idBtn, tagBtn);
+        ul.appendChild(li);
+      });
+    }
+
+    async function refreshCollection() {
+      const data = await api('/api/collection');
+      const tb = $('collection');
+      tb.innerHTML = '';
+      (data.entries || []).forEach(e => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `<td>${e.name}</td><td>${e.artist||''}</td><td>${e.title||''}</td><td>${e.status||''}</td>`;
+        tr.onclick = () => {
+          $('tagFile').value = e.name;
+          $('tagArtist').value = e.artist || '';
+          $('tagTitle').value = e.title || '';
+          $('tagAlbum').value = e.album || '';
+        };
+        tb.appendChild(tr);
+      });
+    }
+
+    $('btnConnect').onclick = async () => {
+      base = $('host').value.trim().replace(/\/$/, '');
+      localStorage.setItem('vinyl_host', base);
+      await refreshAll();
+    };
+    $('btnRefresh').onclick = () => refreshAll();
+    $('btnScan').onclick = () => scanSpeakers().catch(e => alert(e.message));
+    $('btnPlay').onclick = () => api('/api/play', { method: 'POST', body: '{}' }).then(refreshStatus);
+    $('btnStop').onclick = () => api('/api/stop', { method: 'POST', body: '{}' }).then(refreshStatus);
+    $('btnSelect').onclick = async () => {
+      const chosen = speakers.filter(s => selected.has(s._selId)).map(s => ({
+        name: s.name, ip: s.ip, device_id: s.device_id || '', port: s.port, type: s.type || 'airplay'
+      }));
+      if (!chosen.length) return alert('Select at least one speaker');
+      await api('/api/select', { method: 'POST', body: JSON.stringify({ speakers: chosen }) });
+      await api('/api/play', { method: 'POST', body: '{}' });
+      await refreshStatus();
+    };
+    $('vol').onchange = async () => {
+      const db = Number($('vol').value);
+      $('volLabel').textContent = db + ' dB';
+      await api('/api/volume', { method: 'POST', body: JSON.stringify({ db }) });
+    };
+    $('btnRecStart').onclick = () => api('/api/record/start', { method: 'POST', body: '{}' }).then(refreshStatus);
+    $('btnRecStop').onclick = () => api('/api/record/stop', { method: 'POST', body: '{}' }).then(async () => {
+      await refreshStatus(); await refreshFiles(); await refreshCollection();
+    });
+    $('btnFiles').onclick = () => refreshFiles();
+    $('btnSaveSettings').onclick = async () => {
+      try {
+        const body = {
+          device_name: $('devName').value,
+          audio_start_threshold_db: Number($('startDb').value),
+          audio_stop_threshold_db: Number($('stopDb').value),
+          audio_stop_timeout_sec: Number($('stopTo').value),
+          force_open: $('forceOpen').checked,
+          auto_record: $('autoRecord').checked,
+          music_id_enabled: $('musicId').checked,
+          record_auto_split: $('autoSplit').checked,
+        };
+        const key = $('acoustid').value.trim();
+        if (key) body.acoustid_api_key = key;
+        await api('/api/settings', { method: 'PUT', body: JSON.stringify(body) });
+        $('settingsMsg').textContent = 'Saved';
+        $('settingsMsg').className = 'ok';
+        await refreshSettings();
+        await refreshStatus();
+      } catch (e) {
+        $('settingsMsg').textContent = e.message;
+        $('settingsMsg').className = 'err';
+      }
+    };
+    $('btnTag').onclick = async () => {
+      await api('/api/record/tag', {
+        method: 'POST',
+        body: JSON.stringify({
+          file: $('tagFile').value,
+          artist: $('tagArtist').value,
+          title: $('tagTitle').value,
+          album: $('tagAlbum').value,
+        }),
+      });
+      await refreshCollection();
+      await refreshFiles();
+    };
+    $('btnIdentify').onclick = async () => {
+      await api('/api/record/identify', {
+        method: 'POST',
+        body: JSON.stringify({ file: $('tagFile').value || null }),
+      });
+      await refreshCollection();
+      await refreshFiles();
+    };
+
+    async function refreshAll() {
+      await refreshStatus();
+      await refreshSettings();
+      await scanSpeakers().catch(() => {});
+      await refreshFiles().catch(() => {});
+      await refreshCollection().catch(() => {});
+    }
+
+    refreshAll();
+    setInterval(refreshStatus, 2000);
+  </script>
+</body>
+</html>

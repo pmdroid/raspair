@@ -3,6 +3,8 @@
 **/*.rs.bk
 # Local runtime config only (keep Buildroot overlay config.toml tracked)
 /config.toml
+/settings.json
+/rec/
 .idea/
 .vscode/
 
@@ -13,3 +15,7 @@
 # If someone points O= inside the tree:
 /buildroot-output/
 /dl/
+
+# local runtime
+rec/
+settings.json

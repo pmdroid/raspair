@@ -1,11 +1,13 @@
 //! Session manager: signal gate + play/stop intent → AirPlay / Chromecast stubs.
+//! Optional auto-record follows the same energy gate (begin/end of music).
 
 use crate::airplay::AirplayManager;
 use crate::capture::CaptureHandle;
 use crate::chromecast::ChromecastManager;
-use crate::config::Config;
 use crate::control::{ControlState, SessionIntent, TargetType};
+use crate::music_id;
 use crate::record::Recorder;
+use crate::settings::SettingsStore;
 use crate::stats::Stats;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -18,7 +20,7 @@ pub struct SessionRuntime {
     pub chromecast: Arc<ChromecastManager>,
     pub recorder: Arc<Recorder>,
     pub stats: Arc<Stats>,
-    pub cfg: Config,
+    pub settings: Arc<SettingsStore>,
 }
 
 pub async fn run(rt: SessionRuntime) {
@@ -28,15 +30,17 @@ pub async fn run(rt: SessionRuntime) {
 
     // Drain PCM for recording + gate even when no HTTP clients are connected.
     loop {
+        let snap = rt.settings.snapshot();
+
         // Handle explicit play/stop from HTTP.
         match rt.control.intent() {
             SessionIntent::WantPlay => {
                 rt.control.clear_intent();
-                start_sessions(&rt);
+                start_sessions(&rt, &snap);
             }
             SessionIntent::WantStop => {
                 rt.control.clear_intent();
-                stop_sessions(&rt);
+                stop_sessions(&rt, &snap, /*from_gate=*/ false);
             }
             SessionIntent::Idle => {}
         }
@@ -49,7 +53,13 @@ pub async fn run(rt: SessionRuntime) {
                     got += 1;
                     rt.stats.tick_capture();
                     rt.recorder.write_pcm(&block.samples);
-                    apply_gate(&rt, block.rms_dbfs, &mut above_since, &mut below_since);
+                    apply_gate(
+                        &rt,
+                        &snap,
+                        block.rms_dbfs,
+                        &mut above_since,
+                        &mut below_since,
+                    );
                 }
                 Err(tokio::sync::broadcast::error::TryRecvError::Empty) => break,
                 Err(tokio::sync::broadcast::error::TryRecvError::Lagged(n)) => {
@@ -65,8 +75,8 @@ pub async fn run(rt: SessionRuntime) {
             }
         }
 
-        if rt.cfg.force_open && !rt.control.streaming() {
-            start_sessions(&rt);
+        if snap.force_open && !rt.control.streaming() {
+            start_sessions(&rt, &snap);
         }
 
         sleep(Duration::from_millis(5)).await;
@@ -75,30 +85,46 @@ pub async fn run(rt: SessionRuntime) {
 
 fn apply_gate(
     rt: &SessionRuntime,
+    snap: &crate::settings::RuntimeSettings,
     rms: f64,
     above_since: &mut Option<Instant>,
     below_since: &mut Option<Instant>,
 ) {
-    if rt.cfg.force_open {
+    if snap.force_open {
         return;
     }
-    let start_th = rt.cfg.audio_start_threshold_db;
-    let stop_th = rt.cfg.audio_stop_threshold_db;
-    let hold = Duration::from_millis(rt.cfg.audio_start_hold_ms);
-    let stop_to = Duration::from_secs(rt.cfg.audio_stop_timeout_sec);
+    let start_th = snap.audio_start_threshold_db;
+    let stop_th = snap.audio_stop_threshold_db;
+    let hold = Duration::from_millis(snap.audio_start_hold_ms);
+    let stop_to = Duration::from_secs(snap.audio_stop_timeout_sec);
 
     if rms >= start_th {
         below_since.take();
         let since = above_since.get_or_insert_with(Instant::now);
-        if since.elapsed() >= hold && !rt.control.streaming() {
-            start_sessions(rt);
+        if since.elapsed() >= hold {
+            if !rt.control.streaming() {
+                start_sessions(rt, snap);
+            }
+            // Auto-record: begin when energy holds (even if no speakers selected).
+            if snap.auto_record && !rt.recorder.is_recording() {
+                match rt.recorder.start(None) {
+                    Ok(_) => tracing::info!("auto-record started (energy gate)"),
+                    Err(e) => tracing::warn!(error = %e, "auto-record start failed"),
+                }
+            }
         }
     } else if rms < stop_th {
         above_since.take();
-        if rt.control.streaming() {
-            let since = below_since.get_or_insert_with(Instant::now);
-            if since.elapsed() >= stop_to {
-                stop_sessions(rt);
+        let quiet_long = below_since
+            .get_or_insert_with(Instant::now)
+            .elapsed()
+            >= stop_to;
+        if quiet_long {
+            if rt.control.streaming() {
+                stop_sessions(rt, snap, /*from_gate=*/ true);
+            } else if snap.auto_record && rt.recorder.is_recording() {
+                // Auto-record end without an active stream session.
+                stop_auto_record(rt, snap);
             }
         }
     } else {
@@ -108,10 +134,14 @@ fn apply_gate(
     }
 }
 
-fn start_sessions(rt: &SessionRuntime) {
+fn start_sessions(rt: &SessionRuntime, snap: &crate::settings::RuntimeSettings) {
     let targets = rt.control.targets();
     if targets.is_empty() {
         tracing::warn!("play requested but no targets selected");
+        // Still allow auto-record without speakers.
+        if snap.auto_record && !rt.recorder.is_recording() {
+            let _ = rt.recorder.start(None);
+        }
         return;
     }
     let volume = rt.control.volume_db();
@@ -142,14 +172,52 @@ fn start_sessions(rt: &SessionRuntime) {
     rt.control.set_streaming(true);
     rt.stats.session_started();
     tracing::info!(n = targets.len(), "sessions started");
+
+    if snap.auto_record && !rt.recorder.is_recording() {
+        match rt.recorder.start(None) {
+            Ok(_) => tracing::info!("auto-record started with session"),
+            Err(e) => tracing::warn!(error = %e, "auto-record start failed"),
+        }
+    }
 }
 
-fn stop_sessions(rt: &SessionRuntime) {
+fn stop_sessions(
+    rt: &SessionRuntime,
+    snap: &crate::settings::RuntimeSettings,
+    from_gate: bool,
+) {
     rt.airplay.stop();
     rt.chromecast.stop();
     if rt.control.streaming() {
         rt.control.set_streaming(false);
         rt.stats.session_stopped();
-        tracing::info!("sessions stopped");
+        tracing::info!(from_gate, "sessions stopped");
+    }
+    if snap.auto_record && rt.recorder.is_recording() {
+        stop_auto_record(rt, snap);
+    }
+}
+
+fn stop_auto_record(rt: &SessionRuntime, snap: &crate::settings::RuntimeSettings) {
+    match rt.recorder.stop() {
+        Ok(_) => {
+            tracing::info!("auto-record stopped");
+            maybe_identify(rt, snap);
+        }
+        Err(e) => tracing::warn!(error = %e, "auto-record stop failed"),
+    }
+}
+
+fn maybe_identify(rt: &SessionRuntime, snap: &crate::settings::RuntimeSettings) {
+    if let Some(name) = rt.recorder.take_last_finished() {
+        if snap.music_id_enabled {
+            music_id::spawn_identify(rt.recorder.record_dir().to_path_buf(), name, snap.clone());
+        } else {
+            let _ = crate::collection::mark_skipped(
+                rt.recorder.record_dir(),
+                &name,
+                "music_id_enabled is false",
+            );
+        }
     }
 }
