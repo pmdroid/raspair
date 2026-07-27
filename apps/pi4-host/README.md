@@ -102,15 +102,16 @@ default `vinyl-bridge.local`.
 
 ---
 
-## Flash path (validated binary)
+## Flash path (validated binary + SD image)
 
-**Validated 2026-07-27** (see [`STATUS.md`](STATUS.md)):
+**Validated 2026-07-27** (see [`STATUS.md`](STATUS.md) for absolute paths + SHA256):
 
 | Step | Command | Result |
 |---|---|---|
 | aarch64 + ALSA binary | `make build-pi` | **PASS** — `dist/vinyl-bridge-pi` ELF aarch64 |
 | Binary smoke | `./scripts/qemu-smoke.sh binary` | **PASS** — `/api/status` on linux/arm64 |
 | Boot + systemd smoke | `./scripts/qemu-smoke.sh virt` | **PASS** — UEFI `-M virt` + unit + HTTP |
+| SD image assemble | `make image` | **PASS** — Pi OS Lite arm64 + vinyl-bridge payload |
 
 QEMU does **not** prove real line-in, Wi‑Fi RF, or AirPlay→HomePod.
 
@@ -125,17 +126,18 @@ make build-pi
 
 # 2) QEMU gates (binary + virt)
 make qemu-smoke
-# or: ./scripts/qemu-smoke.sh binary && ./scripts/qemu-smoke.sh virt
 
-# 3) Assemble flashable Pi OS Lite image (Linux or privileged Docker)
-./deploy/image/build-sd-image.sh
-# → dist/vinyl-bridge-pi4.img
-# → dist/vinyl-bridge-pi4.img.xz
+# 3) Assemble flashable Pi OS Lite image
+make image
+# macOS: deploy/image/build-sd-image.macos.sh (privileged Docker + kpartx)
+# Linux:  deploy/image/build-sd-image.sh
+#
+# Default write location (NOT in git):
+#   ~/.cache/vinyl-bridge-pi-images/vinyl-bridge-pi4.img
+#   ~/.cache/vinyl-bridge-pi-images/vinyl-bridge-pi4.img.xz
+# Symlinks also appear under dist/ (gitignored).
 
-# 4) Flash
-# Raspberry Pi Imager → Use custom → vinyl-bridge-pi4.img
-# or:
-#   xzcat dist/vinyl-bridge-pi4.img.xz | sudo dd of=/dev/rdiskN bs=4m status=progress
+# 4) Flash — see below
 ```
 
 ### 1) Build the aarch64 binary
@@ -148,23 +150,30 @@ make build-pi
 
 Sources are streamed into Docker via **tar** (avoids flaky bind mounts on external disks).
 
-### 2) Assemble the SD image (Linux / privileged Docker)
+### 2) Assemble the SD image
+
+**macOS (recommended):**
+
+```bash
+make image
+# or: ./deploy/image/build-sd-image.macos.sh
+# optional: IMAGE_OUT=/path/to/dir ./deploy/image/build-sd-image.macos.sh
+```
+
+The macOS wrapper copies sources into a privileged Debian container (OrbStack/Docker
+loop mounts often omit `loopNp*` nodes — the recipe uses **kpartx**), builds the
+card, then `docker cp`s artifacts out. Multi‑GB images stay under
+`~/.cache/vinyl-bridge-pi-images/` by default.
+
+**Linux (native root / sudo):**
 
 ```bash
 ./deploy/image/build-sd-image.sh
+# needs: curl xz-utils util-linux e2fsprogs kpartx cloud-guest-utils
 ```
 
-macOS (privileged container; needs loop mounts):
-
-```bash
-docker run --privileged --rm \
-  -v "$PWD":/src -w /src \
-  debian:bookworm-slim \
-  bash -c 'apt-get update && apt-get install -y curl xz-utils mount util-linux e2fsprogs ca-certificates \
-    && ./deploy/image/build-sd-image.sh'
-```
-
-Recipe: Pi OS Lite arm64 → install `dist/vinyl-bridge-pi` + systemd unit + config → enable SSH → write `dist/vinyl-bridge-pi4.img(.xz)`.
+Recipe: Pi OS Lite arm64 → install `vinyl-bridge-pi` + systemd unit + config →
+enable SSH → grow rootfs → write `vinyl-bridge-pi4.img` + `.img.xz`.
 
 ### 3) QEMU smoke
 
@@ -204,7 +213,7 @@ qemu-system-aarch64 -machine help | grep raspi4b
 qemu-system-aarch64 \
   -machine raspi4b -cpu cortex-a72 -m 2048 -nographic \
   -kernel kernel8.img -dtb bcm2711-rpi-4-b.dtb \
-  -drive file=dist/vinyl-bridge-pi4.img,if=sd,format=raw \
+  -drive file=$HOME/.cache/vinyl-bridge-pi-images/vinyl-bridge-pi4.img,if=sd,format=raw \
   -append "console=ttyAMA0,115200 root=/dev/mmcblk0p2 rootwait rw" \
   -device usb-net,netdev=net0 \
   -netdev user,id=net0,hostfwd=tcp::18080-:80
@@ -218,26 +227,40 @@ qemu-system-aarch64 \
 
 ### 4) Flash the card
 
-**Raspberry Pi Imager:** OS → **Use custom** → `dist/vinyl-bridge-pi4.img` → set Wi‑Fi/user → Write.
+**Current absolute paths (this workstation):**
+
+| File | Path | ~Size |
+|---|---|---|
+| `.img` | `/Users/pascal/.cache/vinyl-bridge-pi-images/vinyl-bridge-pi4.img` | 2.8 GiB |
+| `.img.xz` | `/Users/pascal/.cache/vinyl-bridge-pi-images/vinyl-bridge-pi4.img.xz` | 483 MiB |
+
+**Raspberry Pi Imager:** OS → **Use custom** →  
+`/Users/pascal/.cache/vinyl-bridge-pi-images/vinyl-bridge-pi4.img`  
+→ set Wi‑Fi + username/password (Imager OS customisation) → Write.
 
 **dd (macOS):**
 
 ```bash
 # diskutil list  → raw disk e.g. /dev/rdisk4 (NOT a partition)
-xzcat dist/vinyl-bridge-pi4.img.xz | sudo dd of=/dev/rdiskN bs=4m status=progress
+xzcat /Users/pascal/.cache/vinyl-bridge-pi-images/vinyl-bridge-pi4.img.xz \
+  | sudo dd of=/dev/rdiskN bs=4m status=progress
 diskutil eject /dev/diskN
 ```
 
 **dd (Linux):**
 
 ```bash
-xzcat dist/vinyl-bridge-pi4.img.xz | sudo dd of=/dev/sdX bs=4M status=progress conv=fsync
+xzcat ~/.cache/vinyl-bridge-pi-images/vinyl-bridge-pi4.img.xz \
+  | sudo dd of=/dev/sdX bs=4M status=progress conv=fsync
 ```
 
 ### 5) First boot
 
+Image defaults: hostname **`vinyl-bridge`**, SSH enabled, **`vinyl-bridge.service`**
+enabled, config at `/etc/vinyl-bridge/config.toml`.
+
 ```bash
-ssh <user>@vinyl-bridge.local   # or Imager user / Ethernet IP
+ssh <user>@vinyl-bridge.local   # Imager user / Ethernet IP
 sudo systemctl status vinyl-bridge
 curl -s http://vinyl-bridge.local/api/status
 # set capture_device from `arecord -l` in /etc/vinyl-bridge/config.toml

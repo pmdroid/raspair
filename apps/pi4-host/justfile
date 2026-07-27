@@ -47,9 +47,15 @@ qemu-smoke:
 qemu-binary:
     ./scripts/qemu-smoke.sh binary
 
-# Assemble flashable SD image (Linux / privileged Docker)
+# Assemble flashable SD image (macOS wrapper or native Linux)
 image:
-    ./deploy/image/build-sd-image.sh
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [[ "$(uname -s)" == "Darwin" ]]; then
+      ./deploy/image/build-sd-image.macos.sh
+    else
+      ./deploy/image/build-sd-image.sh
+    fi
 
 clean:
     cargo clean

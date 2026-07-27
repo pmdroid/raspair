@@ -10,7 +10,7 @@ ROOT := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 CARGO ?= cargo
 HTTP_BIND ?= 127.0.0.1:8080
 
-.PHONY: help build-macos run-macos build-pi qemu-smoke qemu-binary test-macos clean
+.PHONY: help build-macos run-macos build-pi qemu-smoke qemu-binary test-macos image clean
 
 help:
 	@echo "Targets:"
@@ -19,6 +19,7 @@ help:
 	@echo "  build-pi      aarch64-linux + ALSA → dist/vinyl-bridge-pi (Docker)"
 	@echo "  qemu-smoke    scripts/qemu-smoke.sh default"
 	@echo "  qemu-binary   scripts/qemu-smoke.sh binary"
+	@echo "  image         assemble flashable Pi OS SD image (.img / .img.xz)"
 	@echo "  test-macos    build + 2s HTTP smoke on $(HTTP_BIND)"
 	@echo "  clean         cargo clean + dist/"
 
@@ -62,7 +63,11 @@ qemu-binary:
 	./scripts/qemu-smoke.sh binary
 
 image:
-	./deploy/image/build-sd-image.sh
+	@if [ "$$(uname -s)" = "Darwin" ]; then \
+		./deploy/image/build-sd-image.macos.sh; \
+	else \
+		./deploy/image/build-sd-image.sh; \
+	fi
 
 clean:
 	$(CARGO) clean
