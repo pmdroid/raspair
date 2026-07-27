@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+# =============================================================================
+# DEPRECATED — Raspberry Pi OS Lite inject via Docker.
+# Prefer: ./deploy/buildroot/build.macos.sh  (or `make image`)
+# =============================================================================
+#
 # macOS entrypoint: assemble vinyl-bridge-pi4.img via privileged Docker.
 #
 # Why not plain bind-mount of apps/pi4-host?
@@ -13,6 +18,8 @@
 #   ./deploy/image/build-sd-image.macos.sh
 #   IMAGE_OUT=/path/to/dir ./deploy/image/build-sd-image.macos.sh
 set -euo pipefail
+
+echo "WARNING: deploy/image/* is DEPRECATED. Prefer Buildroot: make image" >&2
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 DIST="${ROOT}/dist"

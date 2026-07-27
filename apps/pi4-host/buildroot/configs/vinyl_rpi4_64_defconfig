@@ -1,0 +1,74 @@
+# Vinyl Bridge appliance — Raspberry Pi 4 Model B, 64-bit
+# Based on Buildroot configs/raspberrypi4_64_defconfig + minimal appliance bits.
+# Init: busybox (no systemd). Size target: ~100–300 MiB raw sdcard.img.
+#
+# Load with:
+#   make BR2_EXTERNAL=…/apps/pi4-host/buildroot O=… vinyl_rpi4_64_defconfig
+
+BR2_aarch64=y
+BR2_cortex_a72=y
+BR2_ARM_FPU_VFPV4=y
+BR2_TOOLCHAIN_BUILDROOT_CXX=y
+
+# Identity / console
+BR2_TARGET_GENERIC_HOSTNAME="vinyl-bridge"
+BR2_TARGET_GENERIC_ISSUE="Vinyl Bridge appliance"
+BR2_TARGET_GENERIC_ROOT_PASSWD="vinyl"
+BR2_SYSTEM_DHCP="eth0"
+# Busybox init (default) — do NOT enable systemd
+
+# Kernel headers track the RPi kernel series used below
+BR2_PACKAGE_HOST_LINUX_HEADERS_CUSTOM_6_1=y
+
+BR2_LINUX_KERNEL=y
+BR2_LINUX_KERNEL_CUSTOM_TARBALL=y
+BR2_LINUX_KERNEL_CUSTOM_TARBALL_LOCATION="$(call github,raspberrypi,linux,17f135b742c4edb340afb365873c3a574f7e16cb)/linux-17f135b742c4edb340afb365873c3a574f7e16cb.tar.gz"
+BR2_LINUX_KERNEL_DEFCONFIG="bcm2711"
+BR2_LINUX_KERNEL_DTS_SUPPORT=y
+BR2_LINUX_KERNEL_INTREE_DTS_NAME="broadcom/bcm2711-rpi-4-b"
+BR2_LINUX_KERNEL_NEEDS_HOST_OPENSSL=y
+
+# Pi firmware + boot files
+BR2_PACKAGE_RPI_FIRMWARE=y
+BR2_PACKAGE_RPI_FIRMWARE_VARIANT_PI4=y
+BR2_PACKAGE_RPI_FIRMWARE_CONFIG_FILE="$(BR2_EXTERNAL_VINYL_PATH)/board/vinyl-rpi4/config.txt"
+
+# --- Appliance packages (minimal) ---
+BR2_PACKAGE_ALSA_LIB=y
+# arecord/aplay for first-boot capture bring-up (keep utils minimal)
+BR2_PACKAGE_ALSA_UTILS=y
+BR2_PACKAGE_ALSA_UTILS_APLAY=y
+# Disable bulky/interactive defaults from alsa-utils menu
+# BR2_PACKAGE_ALSA_UTILS_ALSAMIXER is not set
+# SSH for field debug (busybox dropbear is lighter than OpenSSH)
+BR2_PACKAGE_DROPBEAR=y
+BR2_PACKAGE_DROPBEAR_SMALL=y
+# Vinyl host daemon (prebuilt ELF staged by deploy/buildroot/build.sh)
+BR2_PACKAGE_VINYL_BRIDGE_PI=y
+
+# Compressed kernel modules (stock RPi defconfig)
+BR2_PACKAGE_BUSYBOX_SHOW_OTHERS=y
+BR2_PACKAGE_KMOD_TOOLS=y
+BR2_PACKAGE_XZ=y
+BR2_PACKAGE_KMOD=y
+BR2_PACKAGE_HOST_KMOD_XZ=y
+
+# Host tools for sdcard.img
+BR2_PACKAGE_HOST_DOSFSTOOLS=y
+BR2_PACKAGE_HOST_GENIMAGE=y
+BR2_PACKAGE_HOST_MTOOLS=y
+
+# Rootfs: ext4, keep lean but leave headroom for /var recordings
+BR2_TARGET_ROOTFS_EXT2=y
+BR2_TARGET_ROOTFS_EXT2_4=y
+BR2_TARGET_ROOTFS_EXT2_SIZE="256M"
+# BR2_TARGET_ROOTFS_TAR is not set
+
+# Overlay + post scripts
+BR2_ROOTFS_OVERLAY="$(BR2_EXTERNAL_VINYL_PATH)/board/vinyl-rpi4/rootfs_overlay"
+BR2_ROOTFS_POST_BUILD_SCRIPT="board/raspberrypi/post-build.sh $(BR2_EXTERNAL_VINYL_PATH)/board/vinyl-rpi4/post-build.sh"
+BR2_ROOTFS_POST_IMAGE_SCRIPT="board/raspberrypi/post-image.sh"
+
+# Wi-Fi firmware intentionally omitted for size/speed — enable later with
+# BR2_PACKAGE_RPI_WIFI_FIRMWARE + wpa_supplicant when RF bring-up starts.
+# Prefer Ethernet for AirPlay TCP in the lab.

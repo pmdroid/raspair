@@ -1,0 +1,13 @@
+config BR2_PACKAGE_VINYL_BRIDGE_PI
+	bool "vinyl-bridge-pi"
+	depends on BR2_aarch64
+	select BR2_PACKAGE_ALSA_LIB
+	help
+	  Vinyl Audio Bridge host daemon (prebuilt aarch64 ELF).
+
+	  Build the binary first with apps/pi4-host `make build-pi`
+	  (Docker linux/arm64 + ALSA). The Buildroot package installs
+	  that artifact into /usr/bin/vinyl-bridge-pi.
+
+	  Busybox init starts it via /etc/init.d/S99vinyl-bridge
+	  (rootfs overlay). Not a Debian/systemd inject.

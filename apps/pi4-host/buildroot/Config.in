@@ -1,0 +1,1 @@
+source "$BR2_EXTERNAL_VINYL_PATH/package/vinyl-bridge-pi/Config.in"

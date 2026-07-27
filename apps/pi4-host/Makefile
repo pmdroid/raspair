@@ -1,8 +1,9 @@
-# Vinyl Bridge host — macOS fast loop + Pi deploy targets
+# Vinyl Bridge host — macOS fast loop + Pi Buildroot appliance
 #
 #   make build-macos    # native macOS (cpal/CoreAudio) — daily dev
 #   make run-macos      # listen on :8080
 #   make build-pi       # aarch64 Linux + ALSA (Docker)
+#   make image          # Buildroot sdcard.img (NOT Raspberry Pi OS)
 #   make qemu-smoke     # binary (+ virt if QEMU present)
 #   make test-macos     # curl smoke against a short-lived process
 
@@ -10,18 +11,19 @@ ROOT := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 CARGO ?= cargo
 HTTP_BIND ?= 127.0.0.1:8080
 
-.PHONY: help build-macos run-macos build-pi qemu-smoke qemu-binary test-macos image clean
+.PHONY: help build-macos run-macos build-pi qemu-smoke qemu-binary test-macos image image-legacy-pios clean
 
 help:
 	@echo "Targets:"
-	@echo "  build-macos   native macOS binary (default features = cpal/CoreAudio)"
-	@echo "  run-macos     cargo run --features cpal on $(HTTP_BIND)"
-	@echo "  build-pi      aarch64-linux + ALSA → dist/vinyl-bridge-pi (Docker)"
-	@echo "  qemu-smoke    scripts/qemu-smoke.sh default"
-	@echo "  qemu-binary   scripts/qemu-smoke.sh binary"
-	@echo "  image         assemble flashable Pi OS SD image (.img / .img.xz)"
-	@echo "  test-macos    build + 2s HTTP smoke on $(HTTP_BIND)"
-	@echo "  clean         cargo clean + dist/"
+	@echo "  build-macos        native macOS binary (default features = cpal/CoreAudio)"
+	@echo "  run-macos          cargo run --features cpal on $(HTTP_BIND)"
+	@echo "  build-pi           aarch64-linux + ALSA → dist/vinyl-bridge-pi (Docker)"
+	@echo "  qemu-smoke         scripts/qemu-smoke.sh default"
+	@echo "  qemu-binary        scripts/qemu-smoke.sh binary"
+	@echo "  image              Buildroot appliance → flashable .img / .img.xz"
+	@echo "  image-legacy-pios  DEPRECATED: inject into Raspberry Pi OS Lite"
+	@echo "  test-macos         build + 2s HTTP smoke on $(HTTP_BIND)"
+	@echo "  clean              cargo clean + dist/"
 
 # --- macOS daily loop (preferred) ---
 
@@ -62,7 +64,18 @@ qemu-smoke:
 qemu-binary:
 	./scripts/qemu-smoke.sh binary
 
+# --- Buildroot appliance (preferred flash path) ---
+
 image:
+	@if [ "$$(uname -s)" = "Darwin" ]; then \
+		./deploy/buildroot/build.macos.sh; \
+	else \
+		./deploy/buildroot/build.sh; \
+	fi
+
+# DEPRECATED: Raspberry Pi OS Lite inject (multi-GB Debian). Prefer `make image`.
+image-legacy-pios:
+	@echo "WARNING: image-legacy-pios is DEPRECATED — use Buildroot (\`make image\`)" >&2
 	@if [ "$$(uname -s)" = "Darwin" ]; then \
 		./deploy/image/build-sd-image.macos.sh; \
 	else \

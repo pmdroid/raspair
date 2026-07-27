@@ -122,7 +122,7 @@ async fn stats_get(State(st): State<AppState>) -> Json<Value> {
 async fn ota_get() -> Json<Value> {
     Json(json!({
         "supported": false,
-        "note": "Pi host updates via apt/systemd image rebuild, not TCP 5001 OTA",
+        "note": "Pi host updates via Buildroot image rebuild or SCP binary, not TCP 5001 OTA",
         "version": env!("CARGO_PKG_VERSION"),
     }))
 }

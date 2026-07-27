@@ -1,0 +1,23 @@
+# Vinyl Bridge appliance — Raspberry Pi 4 (64-bit)
+# Overrides stock board/raspberrypi/config_4_64bit.txt for a leaner boot.
+
+start_file=start4.elf
+fixup_file=fixup4.dat
+
+kernel=Image
+
+# Full framebuffer not required for headless appliance
+disable_overscan=1
+gpu_mem=16
+
+# Serial console on primary UART (Bluetooth moves to mini-UART)
+dtoverlay=miniuart-bt
+dtparam=krnbt=on
+
+arm_64bit=1
+
+# USB audio / generic sound
+dtparam=audio=on
+
+# Quiet-ish boot; still keep serial for bring-up
+enable_uart=1

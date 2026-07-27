@@ -4,3 +4,11 @@
 config.toml
 .idea/
 .vscode/
+
+# Buildroot: never commit downloads, output, or staged binaries
+/buildroot/package/vinyl-bridge-pi/bin/vinyl-bridge-pi
+/buildroot/**/output*/
+/.buildroot-cache/
+# If someone points O= inside the tree:
+/buildroot-output/
+/dl/

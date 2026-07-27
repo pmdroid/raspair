@@ -1,3 +1,5 @@
+# LEGACY for Raspberry Pi OS / systemd hosts only.
+# Buildroot appliance uses busybox /etc/init.d/S99vinyl-bridge instead.
 [Unit]
 Description=Vinyl Audio Bridge (Pi host)
 Documentation=https://github.com/pmdroid/vinyl-repo

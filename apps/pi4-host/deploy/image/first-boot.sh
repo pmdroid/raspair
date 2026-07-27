@@ -1,4 +1,7 @@
 #!/bin/bash
+# DEPRECATED with deploy/image/* (Pi OS Lite path).
+# Buildroot appliances use busybox /etc/init.d/S99vinyl-bridge instead.
+#
 # First-boot helper for a hand-flashed Pi OS Lite card that already has
 # vinyl-bridge-pi installed under /usr/local (see build-sd-image.sh).
 # Safe to re-run.

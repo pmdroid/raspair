@@ -47,10 +47,21 @@ qemu-smoke:
 qemu-binary:
     ./scripts/qemu-smoke.sh binary
 
-# Assemble flashable SD image (macOS wrapper or native Linux)
+# Buildroot appliance image (preferred — not Raspberry Pi OS)
 image:
     #!/usr/bin/env bash
     set -euo pipefail
+    if [[ "$(uname -s)" == "Darwin" ]]; then
+      ./deploy/buildroot/build.macos.sh
+    else
+      ./deploy/buildroot/build.sh
+    fi
+
+# DEPRECATED: Pi OS Lite inject
+image-legacy-pios:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "WARNING: image-legacy-pios is DEPRECATED — use Buildroot (just image)" >&2
     if [[ "$(uname -s)" == "Darwin" ]]; then
       ./deploy/image/build-sd-image.macos.sh
     else

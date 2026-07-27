@@ -1,4 +1,15 @@
 #!/usr/bin/env bash
+# =============================================================================
+# DEPRECATED — Raspberry Pi OS Lite inject (Debian-based, multi-GB).
+#
+# Prefer the Buildroot appliance (super-small busybox image):
+#   make image
+#   ./deploy/buildroot/build.sh          # Linux
+#   ./deploy/buildroot/build.macos.sh    # macOS / Docker
+#
+# This script is kept only for emergency comparison / rollback experiments.
+# =============================================================================
+#
 # Build a flashable Raspberry Pi OS Lite (64-bit) image with vinyl-bridge-pi.
 #
 # Requirements (Linux host or Docker — see README):
@@ -11,6 +22,8 @@
 #   ./deploy/image/build-sd-image.sh
 #   IMAGE_URL=... ./deploy/image/build-sd-image.sh
 set -euo pipefail
+
+echo "WARNING: deploy/image/* is DEPRECATED. Prefer Buildroot: make image" >&2
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 DIST="${ROOT}/dist"

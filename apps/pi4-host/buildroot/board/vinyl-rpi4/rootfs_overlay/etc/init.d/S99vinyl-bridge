@@ -1,0 +1,54 @@
+#!/bin/sh
+#
+# Start the Vinyl Bridge host daemon (busybox init, no systemd).
+#
+DAEMON=/usr/bin/vinyl-bridge-pi
+PIDFILE=/var/run/vinyl-bridge.pid
+CONFIG=/etc/vinyl-bridge/config.toml
+NAME=vinyl-bridge
+
+start() {
+	printf 'Starting %s: ' "$NAME"
+	mkdir -p /var/lib/vinyl-bridge/rec /var/run
+	if [ ! -x "$DAEMON" ]; then
+		echo "FAIL (missing $DAEMON)"
+		return 1
+	fi
+	# Prefer start-stop-daemon when present (busybox applets or util-linux).
+	if command -v start-stop-daemon >/dev/null 2>&1; then
+		start-stop-daemon -S -b -m -p "$PIDFILE" -x "$DAEMON" -- \
+			--config "$CONFIG"
+	else
+		"$DAEMON" --config "$CONFIG" >/var/log/vinyl-bridge.log 2>&1 &
+		echo $! >"$PIDFILE"
+	fi
+	echo "OK"
+}
+
+stop() {
+	printf 'Stopping %s: ' "$NAME"
+	if command -v start-stop-daemon >/dev/null 2>&1 && [ -f "$PIDFILE" ]; then
+		start-stop-daemon -K -p "$PIDFILE" 2>/dev/null || true
+	elif [ -f "$PIDFILE" ]; then
+		kill "$(cat "$PIDFILE")" 2>/dev/null || true
+	fi
+	rm -f "$PIDFILE"
+	echo "OK"
+}
+
+restart() {
+	stop
+	start
+}
+
+case "$1" in
+	start|stop|restart)
+		"$1"
+		;;
+	*)
+		echo "Usage: $0 {start|stop|restart}"
+		exit 1
+		;;
+esac
+
+exit $?
