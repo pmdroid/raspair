@@ -1,0 +1,16 @@
+[package]
+name = "airplay-cli"
+description = "discover and play CLI for the AirPlay 2 client"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["Pascal <me@pascal.sh>"]
+
+[[bin]]
+name = "airplay"
+path = "src/main.rs"
+
+[dependencies]
+airplay-core = { path = "../core" }
+anyhow = "1"
+log = "0.4"
