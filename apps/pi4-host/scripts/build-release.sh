@@ -17,7 +17,7 @@ elif command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
   log "Docker linux/arm64 native build (+alsa)"
   # Stream sources via tar (avoids flaky bind mounts on external volumes).
   # Build artifacts stay in named volumes for cache.
-  tar -C "$ROOT" -cf - Cargo.toml Cargo.lock src \
+  tar -C "$ROOT" -cf - Cargo.toml Cargo.lock src static \
   | docker run --rm -i --platform linux/arm64 \
       -v vinyl-pi-cargo-registry:/usr/local/cargo/registry \
       -v vinyl-pi-cargo-git:/usr/local/cargo/git \

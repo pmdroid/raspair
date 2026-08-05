@@ -122,13 +122,23 @@ fn spawn_browser(
                         seen.insert(name, target);
                         let mut list: Vec<_> = seen.values().cloned().collect();
                         list.sort_by(|a, b| a.name.cmp(&b.name));
-                        *speakers.write() = merge_by_type(&speakers.read(), &list, &target_type);
+                        // Clone under read lock first — never upgrade read→write
+                        // (parking_lot deadlocks; hung /api/speakers).
+                        let merged = {
+                            let existing = speakers.read();
+                            merge_by_type(&existing, &list, &target_type)
+                        };
+                        *speakers.write() = merged;
                     }
                     Ok(ServiceEvent::ServiceRemoved(_, fullname)) => {
                         seen.remove(&fullname);
                         let mut list: Vec<_> = seen.values().cloned().collect();
                         list.sort_by(|a, b| a.name.cmp(&b.name));
-                        *speakers.write() = merge_by_type(&speakers.read(), &list, &target_type);
+                        let merged = {
+                            let existing = speakers.read();
+                            merge_by_type(&existing, &list, &target_type)
+                        };
+                        *speakers.write() = merged;
                     }
                     Ok(_) => {}
                     Err(_) => {

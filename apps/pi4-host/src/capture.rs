@@ -60,6 +60,12 @@ pub fn start(cfg: &Config) -> CaptureHandle {
     let sample_rate = cfg.sample_rate;
     let channels = cfg.channels as usize;
     let bits = cfg.bits;
+    // Used by ALSA path; kept in scope for all targets so macOS cpal builds stay clean.
+    #[cfg_attr(
+        not(all(feature = "alsa", target_os = "linux")),
+        allow(unused_variables)
+    )]
+    let capture_gain_db = cfg.capture_gain_db;
     let device = cfg.capture_device.clone();
 
     std::thread::Builder::new()
@@ -68,21 +74,23 @@ pub fn start(cfg: &Config) -> CaptureHandle {
             // Prefer ALSA on Linux when enabled (Pi shipping path).
             #[cfg(all(feature = "alsa", target_os = "linux"))]
             {
+                // Label before the blocking read loop so /api/status shows "alsa"
+                // while capture is live (run_alsa only returns on stop/error).
+                *backend.write() = "alsa";
                 match run_alsa(
                     &device,
                     sample_rate,
                     channels,
                     bits,
+                    capture_gain_db,
                     &tx,
                     &last_rms_dbfs,
                     &running,
                 ) {
-                    Ok(()) => {
-                        *backend.write() = "alsa";
-                        return;
-                    }
+                    Ok(()) => return,
                     Err(e) => {
                         tracing::error!(error = %e, "ALSA capture failed; trying next backend");
+                        *backend.write() = "starting";
                     }
                 }
             }
@@ -364,6 +372,7 @@ fn run_alsa(
     sample_rate: u32,
     channels: usize,
     bits: u16,
+    gain_db: f64,
     tx: &broadcast::Sender<PcmBlock>,
     last_rms: &Arc<RwLock<f64>>,
     running: &Arc<AtomicBool>,
@@ -376,9 +385,11 @@ fn run_alsa(
         let hwp = HwParams::any(&pcm)?;
         hwp.set_channels(channels as u32)?;
         hwp.set_rate(sample_rate, ValueOr::Nearest)?;
+        // bcm2835 I2S: use S32_LE for 24/32-bit (left-justified 24 in 32-bit slots).
+        // S24_3LE is unavailable; S24_LE packing is ambiguous on this link.
         hwp.set_format(match bits {
             16 => Format::s16(),
-            _ => Format::s24_3(),
+            _ => Format::s32(),
         })?;
         hwp.set_access(Access::RWInterleaved)?;
         pcm.hw_params(&hwp)?;
@@ -388,16 +399,22 @@ fn run_alsa(
     let frames = frames_per_block(sample_rate);
     let bytes_per_sample = match bits {
         16 => 2,
-        _ => 3,
+        _ => 4, // S32_LE slots (24-bit payload left-justified when bits=24)
     };
     let mut buf = vec![0u8; frames as usize * channels * bytes_per_sample];
     let io = pcm.io_bytes();
+    let gain = if gain_db.abs() < 0.01 {
+        1.0
+    } else {
+        10f64.powf(gain_db / 20.0)
+    };
 
     tracing::info!(
         device,
         sample_rate,
         channels,
         bits,
+        gain_db,
         "ALSA capture started"
     );
 
@@ -406,6 +423,9 @@ fn run_alsa(
             Ok(n) if n > 0 => {
                 let n_frames = n as u32;
                 let used = n_frames as usize * channels * bytes_per_sample;
+                if (gain - 1.0).abs() > 1e-6 {
+                    apply_gain_inplace(&mut buf[..used], bits, gain);
+                }
                 let rms = rms_dbfs_bytes(&buf[..used], bits);
                 *last_rms.write() = rms;
                 let _ = tx.send(PcmBlock {
@@ -424,6 +444,27 @@ fn run_alsa(
     Ok(())
 }
 
+/// Scale interleaved PCM in place. Clamps to full-scale to avoid wrap distortion.
+fn apply_gain_inplace(pcm: &mut [u8], bits: u16, gain: f64) {
+    match bits {
+        16 => {
+            for chunk in pcm.chunks_exact_mut(2) {
+                let s = i16::from_le_bytes([chunk[0], chunk[1]]) as f64 * gain;
+                let v = s.round().clamp(i16::MIN as f64, i16::MAX as f64) as i16;
+                chunk.copy_from_slice(&v.to_le_bytes());
+            }
+        }
+        _ => {
+            // 24/32: S32_LE slots (24-bit left-justified when bits=24).
+            for chunk in pcm.chunks_exact_mut(4) {
+                let s = i32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) as f64 * gain;
+                let v = s.round().clamp(i32::MIN as f64, i32::MAX as f64) as i32;
+                chunk.copy_from_slice(&v.to_le_bytes());
+            }
+        }
+    }
+}
+
 #[cfg(feature = "alsa")]
 fn rms_dbfs_bytes(pcm: &[u8], bits: u16) -> f64 {
     if pcm.is_empty() {
@@ -439,9 +480,18 @@ fn rms_dbfs_bytes(pcm: &[u8], bits: u16) -> f64 {
                 n += 1;
             }
         }
+        32 => {
+            for chunk in pcm.chunks_exact(4) {
+                let s = i32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) as f64
+                    / 2_147_483_648.0;
+                sum += s * s;
+                n += 1;
+            }
+        }
         _ => {
-            for chunk in pcm.chunks_exact(3) {
-                let raw = i32::from_le_bytes([chunk[0], chunk[1], chunk[2], 0]) << 8 >> 8;
+            // 24-bit left-justified in 32-bit I2S slot (high 24 bits).
+            for chunk in pcm.chunks_exact(4) {
+                let raw = i32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) >> 8;
                 let s = raw as f64 / 8_388_608.0;
                 sum += s * s;
                 n += 1;

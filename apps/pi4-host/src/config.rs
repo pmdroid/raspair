@@ -20,6 +20,13 @@ pub struct Config {
     pub channels: u16,
     #[serde(default = "default_bits")]
     pub bits: u16,
+    /// Digital gain applied after capture (dB). Negative = quieter headroom.
+    /// WM8782 breakouts with ~6 dB analog boost often need -6…-12 dB here.
+    #[serde(default = "default_capture_gain_db")]
+    pub capture_gain_db: f64,
+    /// TCP port for live capture stream (`GET /capture.wav`), Android parity.
+    #[serde(default = "default_stream_port")]
+    pub stream_port: u16,
     #[serde(default = "default_record_dir")]
     pub record_dir: PathBuf,
     #[serde(default = "default_record_min_free")]
@@ -89,6 +96,8 @@ impl Default for Config {
             sample_rate: default_sample_rate(),
             channels: default_channels(),
             bits: default_bits(),
+            capture_gain_db: default_capture_gain_db(),
+            stream_port: default_stream_port(),
             record_dir: default_record_dir(),
             record_min_free_bytes: default_record_min_free(),
             audio_start_threshold_db: default_start_threshold(),
@@ -155,6 +164,13 @@ fn default_channels() -> u16 {
 }
 fn default_bits() -> u16 {
     24
+}
+fn default_capture_gain_db() -> f64 {
+    // Headroom for hot line-in ADCs (module default ~+6 dB analog gain).
+    -12.0
+}
+fn default_stream_port() -> u16 {
+    8088
 }
 fn default_record_dir() -> PathBuf {
     if cfg!(target_os = "macos") {

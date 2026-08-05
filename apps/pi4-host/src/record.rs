@@ -162,9 +162,10 @@ impl Recorder {
         };
         let armed = !matches!(split.phase, SplitPhase::Idle);
         let dropped = *self.dropped.lock();
+        // data_bytes is on-disk WAV payload size (packed).
         let bps = (self.sample_rate as u64)
             * (self.channels as u64)
-            * (self.bits as u64 / 8).max(1);
+            * (wav_bytes_per_sample(self.bits) as u64).max(1);
         let seconds = if bps > 0 { bytes / bps } else { 0 };
         RecordStatus {
             recording: armed || recording_file,
@@ -292,19 +293,26 @@ impl Recorder {
         Ok(self.status())
     }
 
-    /// Append interleaved PCM. Safe to call from capture path.
+    /// Append interleaved PCM from the capture path.
+    ///
+    /// Capture (ALSA) delivers 16-bit as 2 bytes/sample and 24/32-bit as
+    /// **4 bytes/sample** (`S24_LE` / `S32_LE`). On disk we store standard WAV:
+    /// 16→2, 24→packed 3-byte, 32→4. Packing 24-bit here fixes phone playback
+    /// (old path wrote 4-byte frames under a 3-byte-per-sample WAV header → static).
     pub fn write_pcm(&self, pcm: &[u8]) {
-        let frame = frame_bytes(self.channels, self.bits);
-        if frame == 0 || pcm.is_empty() {
+        let wire_frame = wire_frame_bytes(self.channels, self.bits);
+        if wire_frame == 0 || pcm.is_empty() {
             return;
         }
-        let usable = pcm.len() - (pcm.len() % frame);
+        let usable = pcm.len() - (pcm.len() % wire_frame);
         if usable == 0 {
             return;
         }
         let block = &pcm[..usable];
-        let db = block_dbfs(block, self.bits);
-        let block_ms = (usable / frame) as f64 * 1000.0 / self.sample_rate as f64;
+        let db = block_dbfs_wire(block, self.bits);
+        let n_frames = usable / wire_frame;
+        let block_ms = n_frames as f64 * 1000.0 / self.sample_rate as f64;
+        let disk = pcm_wire_to_wav(block, self.bits);
 
         let mut split = self.split.lock();
         split.level_dbfs = db;
@@ -313,14 +321,16 @@ impl Recorder {
             SplitPhase::Idle => {}
             SplitPhase::RecordingSession => {
                 drop(split);
-                self.append_pcm(block);
+                self.append_pcm(&disk);
             }
             SplitPhase::Listening => {
+                let disk_frame = wav_frame_bytes(self.channels, self.bits);
                 let preroll_cap = (self.preroll_ms / 1000.0
                     * self.sample_rate as f64
-                    * frame as f64) as usize;
-                split.preroll.push_back(block.to_vec());
-                split.preroll_bytes += usable;
+                    * disk_frame as f64) as usize;
+                let disk_len = disk.len();
+                split.preroll.push_back(disk);
+                split.preroll_bytes += disk_len;
                 while split.preroll_bytes > preroll_cap && split.preroll.len() > 1 {
                     if let Some(old) = split.preroll.pop_front() {
                         split.preroll_bytes = split.preroll_bytes.saturating_sub(old.len());
@@ -351,7 +361,7 @@ impl Recorder {
             }
             SplitPhase::RecordingTrack => {
                 drop(split);
-                self.append_pcm(block);
+                self.append_pcm(&disk);
                 let mut split = self.split.lock();
                 if db > self.stop_db {
                     split.quiet_ms = 0.0;
@@ -447,7 +457,7 @@ impl Recorder {
     }
 
     fn tail_bytes(&self) -> u64 {
-        let frame = frame_bytes(self.channels, self.bits) as f64;
+        let frame = wav_frame_bytes(self.channels, self.bits) as f64;
         (self.tail_ms / 1000.0 * self.sample_rate as f64 * frame) as u64
     }
 
@@ -536,7 +546,7 @@ fn finalize_active(
         data_bytes as u32,
     )?;
     active.file.flush()?;
-    let frame = frame_bytes(active.channels, active.bits) as u64;
+    let frame = wav_frame_bytes(active.channels, active.bits) as u64;
     let byte_rate = active.sample_rate as u64 * frame;
     let duration_sec = if byte_rate > 0 {
         data_bytes as f64 / byte_rate as f64
@@ -557,12 +567,55 @@ fn finalize_active(
     })
 }
 
-fn frame_bytes(channels: u16, bits: u16) -> usize {
-    channels as usize * (bits as usize / 8)
+/// Bytes per sample on the wire from `capture` (ALSA).
+fn wire_bytes_per_sample(bits: u16) -> usize {
+    match bits {
+        16 => 2,
+        // ALSA S24_LE and S32_LE both use 32-bit slots.
+        24 | 32 => 4,
+        _ => (bits as usize / 8).max(1),
+    }
 }
 
-fn block_dbfs(buf: &[u8], bits: u16) -> f64 {
-    let bps = (bits / 8) as usize;
+/// Bytes per sample stored in the WAV file.
+fn wav_bytes_per_sample(bits: u16) -> usize {
+    match bits {
+        16 => 2,
+        24 => 3,
+        32 => 4,
+        _ => (bits as usize / 8).max(1),
+    }
+}
+
+fn wire_frame_bytes(channels: u16, bits: u16) -> usize {
+    channels as usize * wire_bytes_per_sample(bits)
+}
+
+fn wav_frame_bytes(channels: u16, bits: u16) -> usize {
+    channels as usize * wav_bytes_per_sample(bits)
+}
+
+/// Convert capture PCM to on-disk WAV sample packing.
+fn pcm_wire_to_wav(pcm: &[u8], bits: u16) -> Vec<u8> {
+    if bits != 24 {
+        // 16-bit and 32-bit: write the ALSA bytes as-is.
+        return pcm.to_vec();
+    }
+    // bcm2835 I2S delivers 24-bit audio **left-justified** in a 32-bit slot
+    // (low byte is always 0). Pack the high 24 bits into standard 3-byte PCM.
+    // Packing the low 24 bits instead produces hammering static on phones.
+    let mut out = Vec::with_capacity(pcm.len() / 4 * 3);
+    for c in pcm.chunks_exact(4) {
+        let x = i32::from_le_bytes([c[0], c[1], c[2], c[3]]);
+        let v = x >> 8; // drop empty low byte, keep 24 MSBs
+        let b = v.to_le_bytes();
+        out.extend_from_slice(&b[0..3]);
+    }
+    out
+}
+
+fn block_dbfs_wire(buf: &[u8], bits: u16) -> f64 {
+    let bps = wire_bytes_per_sample(bits);
     if bps == 0 || buf.len() < bps {
         return -120.0;
     }
@@ -576,15 +629,20 @@ fn block_dbfs(buf: &[u8], bits: u16) -> f64 {
         _ => 8_388_608.0,
     };
     while i + bps <= buf.len() {
-        let s = match bps {
-            2 => i16::from_le_bytes([buf[i], buf[i + 1]]) as f64,
-            3 => {
+        let s = match (bits, bps) {
+            (16, 2) => i16::from_le_bytes([buf[i], buf[i + 1]]) as f64,
+            // Left-justified 24-bit in 32-bit slot (high 24 bits).
+            (24, 4) => {
+                let raw = i32::from_le_bytes([buf[i], buf[i + 1], buf[i + 2], buf[i + 3]]);
+                (raw >> 8) as f64
+            }
+            (_, 3) => {
                 let b0 = buf[i] as i32;
                 let b1 = buf[i + 1] as i32;
                 let b2 = buf[i + 2] as i8 as i32;
                 ((b2 << 16) | (b1 << 8) | b0) as f64
             }
-            4 => i32::from_le_bytes([buf[i], buf[i + 1], buf[i + 2], buf[i + 3]]) as f64,
+            (_, 4) => i32::from_le_bytes([buf[i], buf[i + 1], buf[i + 2], buf[i + 3]]) as f64,
             _ => 0.0,
         };
         acc += s * s;

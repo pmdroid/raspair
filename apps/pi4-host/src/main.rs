@@ -19,6 +19,7 @@ mod record;
 mod session;
 mod settings;
 mod stats;
+mod stream_tap;
 mod webapi;
 
 use crate::airplay::AirplayManager;
@@ -124,7 +125,7 @@ async fn main() -> Result<()> {
 
     let rt = SessionRuntime {
         control,
-        capture,
+        capture: capture.clone(),
         airplay,
         chromecast,
         recorder,
@@ -132,6 +133,9 @@ async fn main() -> Result<()> {
         settings,
     };
     tokio::spawn(session::run(rt));
+
+    // Live capture tap (Android CAPTURE_PORT / ESP capture_tap parity).
+    stream_tap::start_tcp_server(capture, &cfg);
 
     let addr: SocketAddr = cfg
         .http_bind

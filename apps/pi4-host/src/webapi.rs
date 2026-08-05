@@ -12,6 +12,7 @@ use crate::music_id;
 use crate::record::Recorder;
 use crate::settings::{SettingsPatch, SettingsStore};
 use crate::stats::Stats;
+use crate::stream_tap::{self, StreamParams};
 use axum::extract::{Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
@@ -43,6 +44,10 @@ pub fn router(state: AppState) -> Router {
         .route("/", get(ui_get))
         .route("/ui", get(ui_get))
         .route("/ui/", get(ui_get))
+        // Live capture stream (ESP capture_tap / Chromecast PCM URL parity)
+        .route("/capture.wav", get(stream_get))
+        .route("/stream", get(stream_get))
+        .route("/stream.wav", get(stream_get))
         // Core API (p4-bridge parity)
         .route("/api/status", get(status_get))
         .route("/api/speakers", get(speakers_get))
@@ -101,8 +106,17 @@ async fn api_root_get(State(st): State<AppState>) -> Json<Value> {
             "POST /api/record/identify",
             "GET /api/collection",
             "GET /api/stats",
+            "GET /capture.wav",
+            "GET /stream",
+            "GET /stream.wav",
+            "GET :8088/capture.wav",
         ]
     }))
+}
+
+async fn stream_get(State(st): State<AppState>) -> Response {
+    let params = StreamParams::from_config(&st.cfg);
+    stream_tap::axum_live_response(st.capture.clone(), params)
 }
 
 fn status_json(st: &AppState) -> Value {
@@ -142,6 +156,21 @@ fn status_json(st: &AppState) -> Value {
             "settings": "ok",
             "music_id": if settings.music_id_ready { "ready" } else { "degraded" },
             "web_ui": "ok",
+            "capture_stream": "ok",
+        },
+        "capture_stream": {
+            "port": st.cfg.stream_port,
+            "path": "/capture.wav",
+            "format": "audio/wav",
+            "sample_rate": stream_tap::STREAM_RATE,
+            "channels": stream_tap::STREAM_CHANNELS,
+            "bits": stream_tap::STREAM_BITS,
+            "urls": [
+                format!("http://0.0.0.0:{}/capture.wav", st.cfg.stream_port),
+                "/capture.wav",
+                "/stream",
+                "/stream.wav",
+            ],
         }
     })
 }
