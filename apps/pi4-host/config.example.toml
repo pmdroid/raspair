@@ -19,6 +19,9 @@ bits = 24
 capture_gain_db = -12.0
 # Live capture stream for Android / VLC (ESP capture_tap parity).
 stream_port = 8088
+# AirPlay: "realtime" = type 96 NTP, faster start, 16-bit (default).
+#           "buffered" = type 103 PTP, 24-bit, higher quality / slower arm.
+airplay_mode = "realtime"
 
 # Recording directory (replaces microSD mount on the ESP path).
 record_dir = "/var/lib/vinyl-bridge/rec"

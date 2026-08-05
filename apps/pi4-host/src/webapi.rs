@@ -143,7 +143,7 @@ fn status_json(st: &AppState) -> Value {
             "record_dir": settings.record_dir,
         },
         "parity": {
-            "airplay2": "live",
+            "airplay2": format!("live/{}", st.airplay.transport_label()),
             "chromecast": "ok",
             "capture": st.capture.backend(),
             "capture_features": {

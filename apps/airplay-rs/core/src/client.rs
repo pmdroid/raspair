@@ -1057,6 +1057,42 @@ impl Client {
         Ok(())
     }
 
+    pub fn has_realtime(&self) -> bool {
+        self.streamer.is_some()
+    }
+
+    /// Samples per frame for the realtime stream (typically 352).
+    pub fn realtime_samples_per_frame(&self) -> Option<i32> {
+        self.streamer.as_ref().map(|s| {
+            // RealtimeStream does not expose spf publicly; 352 is the SETUP default.
+            let _ = s;
+            352i32
+        })
+    }
+
+    /// Encrypt and UDP-write one realtime PCM frame (usually 352×2×2 big-endian
+    /// L16). After `setup_realtime` (which already RECORD/FLUSH/syncs), feed
+    /// continuously from a capture thread.
+    pub fn write_realtime_frame(&mut self, payload: &[u8], marker: bool) -> Result<()> {
+        let s = self
+            .streamer
+            .as_mut()
+            .ok_or_else(|| anyhow!("realtime stream not set up"))?;
+        s.write_frame(payload, marker)
+            .context("write realtime frame")?;
+        feedback_if_due(self);
+        Ok(())
+    }
+
+    /// Send an NTP sync packet (call ~1/s from the live sender).
+    pub fn send_realtime_sync(&mut self, first: bool) -> Result<()> {
+        let s = self
+            .streamer
+            .as_mut()
+            .ok_or_else(|| anyhow!("realtime stream not set up"))?;
+        s.send_sync(first).context("realtime sync")
+    }
+
     pub fn stop(&mut self) -> Result<()> {
         if let Some(b) = self.buffered.as_mut() {
             b.stop();
@@ -1157,6 +1193,36 @@ pub fn play_pcm_synchronized(clients: &mut [Client], samples: &[f32], sample_rat
             std::thread::sleep(d);
         }
         i += frame_samples;
+    }
+    Ok(())
+}
+
+/// Align realtime RTP clocks across a stereo pair and re-FLUSH/sync so both
+/// speakers share one timeline. Call after every client has `setup_realtime`.
+pub fn begin_live_realtime_synchronized(clients: &mut [Client]) -> Result<()> {
+    if clients.is_empty() {
+        bail!("no clients");
+    }
+    for c in clients.iter() {
+        if c.streamer.is_none() {
+            bail!("realtime stream not set up");
+        }
+    }
+    let seq = clients[0].streamer.as_ref().unwrap().seq();
+    let rtp_time = clients[0].streamer.as_ref().unwrap().rtp_timestamp();
+    let start_ntp = stream::ntp_now();
+    for c in clients.iter_mut() {
+        let s = c.streamer.as_mut().unwrap();
+        s.set_clock(seq, rtp_time, start_ntp);
+        let rtp_info = format!("seq={};rtptime={}", s.seq(), s.rtp_timestamp());
+        let path = c.rtsp_path.clone();
+        let _ = c.rtsp_mut().do_request(setup::new_flush(&path, &rtp_info));
+        c.streamer
+            .as_mut()
+            .unwrap()
+            .send_sync(true)
+            .context("first sync")?;
+        c.last_feedback = Instant::now();
     }
     Ok(())
 }

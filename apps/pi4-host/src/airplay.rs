@@ -1,13 +1,18 @@
 //! AirPlay 2 session orchestrator — real sender via `airplay-core`.
 //!
-//! Buffered type-103 stream, **pcm24-48 little-endian** (352-sample frames),
-//! live PCM from capture. Client RTSP/TCP is blocking: a dedicated worker
-//! thread owns all `Client`s. Fail-soft per speaker (one write failure drops
-//! that speaker only).
+//! Modes (`airplay_mode` in config):
+//! - **realtime** (default): type-96 NTP, **PCM16 BE** @ 48 kHz — faster start
+//! - **buffered**: type-103 PTP, **PCM24 LE** @ 48 kHz — higher quality
+//!
+//! Live PCM from capture. Client RTSP/TCP is blocking: a dedicated worker
+//! thread owns all `Client`s. Fail-soft per speaker.
 
 use crate::control::SpeakerTarget;
 use crate::stream_tap;
-use airplay_core::client::{begin_live_buffered_synchronized, BufferedAudioFormat, Client};
+use airplay_core::client::{
+    begin_live_buffered_synchronized, begin_live_realtime_synchronized, BufferedAudioFormat,
+    Client,
+};
 use airplay_core::discovery::Device;
 use airplay_core::protocol::{
     FeatureFlags, TxtRecord, FEATURE_SUPPORTS_AIRPLAY_AUDIO, FEATURE_SUPPORTS_BUFFERED_AUDIO,
@@ -26,11 +31,42 @@ use std::time::Duration;
 /// HomePod default PIN (transient pair-setup).
 const HOMEPOD_PIN: &str = "3939";
 
-/// PCM24 stereo @ 48 kHz frame: 352 samples × 2 ch × 3 bytes.
-const FRAME_BYTES: usize = 352 * 2 * 3;
+/// Buffered PCM24 stereo @ 48 kHz: 352 × 2 × 3.
+const FRAME_BYTES_BUFFERED: usize = 352 * 2 * 3;
+/// Realtime PCM16 stereo @ 48 kHz: 352 × 2 × 2 (big-endian L16).
+const FRAME_BYTES_REALTIME: usize = 352 * 2 * 2;
 
-/// ~0.7 s of frames at 48 kHz (96 × 7.33 ms).
+/// ~0.7 s of frames at 48 kHz.
 const PCM_CHANNEL_CAP: usize = 96;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AirplayTransport {
+    Realtime,
+    Buffered,
+}
+
+impl AirplayTransport {
+    fn parse(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "buffered" | "buffer" | "ptp" | "103" => Self::Buffered,
+            _ => Self::Realtime,
+        }
+    }
+
+    fn frame_bytes(self) -> usize {
+        match self {
+            Self::Realtime => FRAME_BYTES_REALTIME,
+            Self::Buffered => FRAME_BYTES_BUFFERED,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Realtime => "realtime",
+            Self::Buffered => "buffered",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct AirplaySessionInfo {
@@ -56,29 +92,30 @@ struct SharedState {
 }
 
 pub struct AirplayManager {
-    /// True when the worker has ≥1 armed client (PCM is accepted).
     active: Arc<AtomicBool>,
     worker: Mutex<Option<WorkerHandle>>,
     shared: Arc<RwLock<SharedState>>,
-    /// Residual packed PCM24@48k awaiting a full 352-frame.
     residual: Mutex<Vec<u8>>,
     wire_rate: u32,
     wire_bits: u16,
     channels: u16,
+    transport: AirplayTransport,
 }
 
 impl AirplayManager {
-    pub fn new(wire_rate: u32, wire_bits: u16, channels: u16) -> Self {
+    pub fn new(wire_rate: u32, wire_bits: u16, channels: u16, airplay_mode: &str) -> Self {
+        let transport = AirplayTransport::parse(airplay_mode);
         Self {
             active: Arc::new(AtomicBool::new(false)),
             worker: Mutex::new(None),
             shared: Arc::new(RwLock::new(SharedState {
                 sessions: Vec::new(),
             })),
-            residual: Mutex::new(Vec::with_capacity(FRAME_BYTES * 2)),
+            residual: Mutex::new(Vec::with_capacity(transport.frame_bytes() * 2)),
             wire_rate,
             wire_bits,
             channels: channels.max(1),
+            transport,
         }
     }
 
@@ -86,11 +123,11 @@ impl AirplayManager {
         self.active.load(Ordering::Relaxed)
     }
 
-    /// Start AirPlay sessions toward the given targets (fail-soft per speaker).
-    ///
-    /// Returns immediately after spawning the RTSP worker (does not block the
-    /// session loop for seconds of pairing). `is_active` / `push_pcm` become
-    /// live once at least one speaker finishes setup.
+    pub fn transport_label(&self) -> &'static str {
+        self.transport.label()
+    }
+
+    /// Start AirPlay sessions (non-blocking spawn).
     pub fn start(&self, targets: &[SpeakerTarget], volume_db: f32) -> anyhow::Result<()> {
         if targets.is_empty() {
             anyhow::bail!("no AirPlay targets");
@@ -106,7 +143,7 @@ impl AirplayManager {
                     name: t.name.clone(),
                     ip: t.ip.clone(),
                     active: false,
-                    note: "connecting…".into(),
+                    note: format!("connecting… ({})", self.transport.label()),
                 })
                 .collect();
         }
@@ -116,11 +153,12 @@ impl AirplayManager {
         let (tx, rx) = mpsc::sync_channel::<WorkerMsg>(PCM_CHANNEL_CAP);
         let shared = self.shared.clone();
         let active = self.active.clone();
+        let transport = self.transport;
 
         let join = thread::Builder::new()
             .name("airplay-send".into())
             .spawn(move || {
-                worker_main(rx, targets, volume_db as f64, shared, active);
+                worker_main(rx, targets, volume_db as f64, shared, active, transport);
             })
             .map_err(|e| anyhow::anyhow!("spawn airplay worker: {e}"))?;
 
@@ -144,7 +182,7 @@ impl AirplayManager {
         }
         for s in self.shared.write().sessions.iter_mut() {
             s.active = false;
-            if s.note == "live" || s.note == "connecting…" {
+            if s.note.starts_with("live") || s.note.starts_with("connecting") {
                 s.note = "stopped".into();
             }
         }
@@ -157,18 +195,26 @@ impl AirplayManager {
         }
     }
 
-    /// Feed a capture wire block (same format as recorder / stream_tap).
-    /// Converts to 48 kHz PCM24 LE and pushes complete 352-sample frames.
+    /// Feed capture wire PCM; converts to the active transport frame format.
     pub fn push_pcm(&self, wire: &[u8]) {
         if !self.is_active() || wire.is_empty() {
             return;
         }
-        let packed =
+        // 48 kHz PCM24 LE first (stream_tap path).
+        let pcm24 =
             stream_tap::wire_to_stream_pcm(wire, self.wire_bits, self.wire_rate, self.channels);
+        if pcm24.is_empty() {
+            return;
+        }
+        let packed = match self.transport {
+            AirplayTransport::Buffered => pcm24,
+            AirplayTransport::Realtime => pcm24_le_to_pcm16_be(&pcm24),
+        };
         if packed.is_empty() {
             return;
         }
 
+        let frame_bytes = self.transport.frame_bytes();
         let mut residual = self.residual.lock();
         residual.extend_from_slice(&packed);
 
@@ -180,8 +226,8 @@ impl AirplayManager {
             }
         };
 
-        while residual.len() >= FRAME_BYTES {
-            let frame: Vec<u8> = residual.drain(..FRAME_BYTES).collect();
+        while residual.len() >= frame_bytes {
+            let frame: Vec<u8> = residual.drain(..frame_bytes).collect();
             match tx.try_send(WorkerMsg::Frame(frame)) {
                 Ok(()) => {}
                 Err(mpsc::TrySendError::Full(_)) => {
@@ -215,8 +261,19 @@ impl AirplayManager {
 
 impl Default for AirplayManager {
     fn default() -> Self {
-        Self::new(48_000, 24, 2)
+        Self::new(48_000, 24, 2, "realtime")
     }
+}
+
+/// PCM24 little-endian interleaved → PCM16 big-endian (realtime L16).
+fn pcm24_le_to_pcm16_be(pcm24: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(pcm24.len() / 3 * 2);
+    for c in pcm24.chunks_exact(3) {
+        let raw = c[0] as i32 | ((c[1] as i32) << 8) | ((c[2] as i8 as i32) << 16);
+        let s16 = (raw >> 8).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+        out.extend_from_slice(&s16.to_be_bytes());
+    }
+    out
 }
 
 // ---- worker ----------------------------------------------------------------
@@ -224,6 +281,8 @@ impl Default for AirplayManager {
 struct LiveClient {
     name: String,
     client: Client,
+    /// Realtime: packets since last NTP sync.
+    packets: u32,
 }
 
 fn worker_main(
@@ -232,20 +291,32 @@ fn worker_main(
     volume_db: f64,
     shared: Arc<RwLock<SharedState>>,
     active: Arc<AtomicBool>,
+    transport: AirplayTransport,
 ) {
-    let format = BufferedAudioFormat::pcm_48000_24_stereo(true);
     let groups = group_targets(&targets);
     let mut clients: Vec<LiveClient> = Vec::new();
 
     for group in groups {
-        match setup_and_begin_group(&group, volume_db, &format, &shared) {
+        let res = match transport {
+            AirplayTransport::Realtime => setup_and_begin_realtime(&group, volume_db, &shared),
+            AirplayTransport::Buffered => {
+                let format = BufferedAudioFormat::pcm_48000_24_stereo(true);
+                setup_and_begin_buffered(&group, volume_db, &format, &shared)
+            }
+        };
+        match res {
             Ok(group_live) => clients.extend(group_live),
             Err(e) => {
-                tracing::error!(error = %e, n = group.len(), "airplay: group failed");
+                tracing::error!(
+                    error = %e,
+                    n = group.len(),
+                    mode = transport.label(),
+                    "airplay: group failed"
+                );
                 for t in &group {
                     let mut s = shared.write();
                     if let Some(row) = s.sessions.iter_mut().find(|r| r.name == t.name) {
-                        if !row.active && row.note == "connecting…" {
+                        if !row.active && row.note.starts_with("connecting") {
                             row.note = format!("error: {e:#}");
                         }
                     }
@@ -256,7 +327,7 @@ fn worker_main(
 
     if clients.is_empty() {
         active.store(false, Ordering::Relaxed);
-        tracing::error!("airplay: no live clients");
+        tracing::error!(mode = transport.label(), "airplay: no live clients");
         while let Ok(msg) = rx.recv() {
             if matches!(msg, WorkerMsg::Stop) {
                 break;
@@ -266,22 +337,47 @@ fn worker_main(
     }
 
     active.store(true, Ordering::Relaxed);
-    tracing::info!(n = clients.len(), "airplay: live sessions ready");
+    tracing::info!(
+        n = clients.len(),
+        mode = transport.label(),
+        "airplay: live sessions ready"
+    );
+
+    // ~1 sync/s for realtime (352 samples @ 48 kHz ≈ 136 pkt/s).
+    const REALTIME_SYNC_EVERY: u32 = 136;
+    let mut first_frame = true;
 
     loop {
         match rx.recv_timeout(Duration::from_secs(2)) {
             Ok(WorkerMsg::Frame(frame)) => {
-                clients.retain_mut(|c| match c.client.write_buffered_frame(&frame) {
-                    Ok(()) => true,
-                    Err(e) => {
-                        tracing::warn!(
-                            name = %c.name,
-                            error = %e,
-                            "airplay: write failed; dropping speaker"
-                        );
-                        let _ = c.client.stop();
-                        update_session(&shared, &c.name, false, &format!("error: {e:#}"));
-                        false
+                let marker = first_frame;
+                first_frame = false;
+                clients.retain_mut(|c| {
+                    let write = match transport {
+                        AirplayTransport::Buffered => c.client.write_buffered_frame(&frame),
+                        AirplayTransport::Realtime => {
+                            let r = c.client.write_realtime_frame(&frame, marker);
+                            if r.is_ok() {
+                                c.packets = c.packets.wrapping_add(1);
+                                if c.packets % REALTIME_SYNC_EVERY == 0 {
+                                    let _ = c.client.send_realtime_sync(false);
+                                }
+                            }
+                            r
+                        }
+                    };
+                    match write {
+                        Ok(()) => true,
+                        Err(e) => {
+                            tracing::warn!(
+                                name = %c.name,
+                                error = %e,
+                                "airplay: write failed; dropping speaker"
+                            );
+                            let _ = c.client.stop();
+                            update_session(&shared, &c.name, false, &format!("error: {e:#}"));
+                            false
+                        }
                     }
                 });
                 if clients.is_empty() {
@@ -307,7 +403,7 @@ fn worker_main(
         update_session(&shared, &c.name, false, "stopped");
     }
     active.store(false, Ordering::Relaxed);
-    tracing::info!("airplay: worker stopped");
+    tracing::info!(mode = transport.label(), "airplay: worker stopped");
 }
 
 fn update_session(shared: &RwLock<SharedState>, name: &str, active: bool, note: &str) {
@@ -318,8 +414,6 @@ fn update_session(shared: &RwLock<SharedState>, name: &str, active: bool, note: 
     }
 }
 
-/// Group targets: same non-empty `tight_sync_id` → stereo pair; others alone.
-/// Within a pair, sort so the primary name (without " (2)") is leader.
 fn group_targets(targets: &[SpeakerTarget]) -> Vec<Vec<SpeakerTarget>> {
     let mut by_tsid: HashMap<String, Vec<SpeakerTarget>> = HashMap::new();
     let mut singles: Vec<Vec<SpeakerTarget>> = Vec::new();
@@ -335,7 +429,6 @@ fn group_targets(targets: &[SpeakerTarget]) -> Vec<Vec<SpeakerTarget>> {
     for (_tsid, mut group) in by_tsid {
         if group.len() >= 2 {
             group.sort_by(|a, b| {
-                // Prefer "Living Room" over "Living Room (2)" as PTP leader.
                 let ra = stereo_rank(&a.name);
                 let rb = stereo_rank(&b.name);
                 ra.cmp(&rb).then_with(|| a.name.cmp(&b.name))
@@ -365,9 +458,113 @@ fn stereo_rank(name: &str) -> u8 {
     }
 }
 
-/// Connect + setup_buffered for each target in the group (share PTP/group UUID
-/// within the group), then arm RECORD/anchor for live write.
-fn setup_and_begin_group(
+// ---- realtime ---------------------------------------------------------------
+
+fn setup_and_begin_realtime(
+    group: &[SpeakerTarget],
+    volume_db: f64,
+    shared: &RwLock<SharedState>,
+) -> anyhow::Result<Vec<LiveClient>> {
+    if group.is_empty() {
+        anyhow::bail!("empty group");
+    }
+
+    let mut staged: Vec<LiveClient> = Vec::new();
+    let mut leader_uuid = String::new();
+
+    for (i, t) in group.iter().enumerate() {
+        update_session(shared, &t.name, false, "connecting… (realtime)");
+        let dev = device_from_target(t);
+        let mut client = Client::new();
+        client.set_startup_volume(volume_db);
+
+        if i > 0 && !leader_uuid.is_empty() {
+            client.set_group_uuid(&leader_uuid);
+        }
+
+        if let Err(e) = client.connect(&dev, HOMEPOD_PIN) {
+            tracing::error!(name = %t.name, ip = %t.ip, error = %e, "airplay: connect failed");
+            update_session(shared, &t.name, false, &format!("error: connect {e:#}"));
+            continue;
+        }
+
+        // setup_realtime already RECORD + FLUSH + first sync (no PTP wait).
+        if let Err(e) = client.setup_realtime(48_000, 2) {
+            tracing::error!(name = %t.name, error = %e, "airplay: setup_realtime failed");
+            let _ = client.stop();
+            update_session(shared, &t.name, false, &format!("error: setup {e:#}"));
+            continue;
+        }
+
+        if i == 0 || leader_uuid.is_empty() {
+            leader_uuid = client.group_uuid().to_string();
+        }
+
+        tracing::info!(
+            name = %t.name,
+            ip = %t.ip,
+            "airplay: connected (realtime pcm16-48)"
+        );
+        staged.push(LiveClient {
+            name: t.name.clone(),
+            client,
+            packets: 0,
+        });
+    }
+
+    if staged.is_empty() {
+        anyhow::bail!("all speakers in group failed connect/setup");
+    }
+
+    if staged.len() == 1 {
+        update_session(shared, &staged[0].name, true, "live (realtime)");
+        return Ok(staged);
+    }
+
+    // Align RTP clocks across the pair (no PTP).
+    let names: Vec<String> = staged.iter().map(|c| c.name.clone()).collect();
+    let mut raw: Vec<Client> = staged.into_iter().map(|c| c.client).collect();
+    match begin_live_realtime_synchronized(&mut raw) {
+        Ok(()) => {
+            let mut out = Vec::with_capacity(raw.len());
+            for (name, client) in names.into_iter().zip(raw.into_iter()) {
+                update_session(shared, &name, true, "live (realtime)");
+                out.push(LiveClient {
+                    name,
+                    client,
+                    packets: 0,
+                });
+            }
+            Ok(out)
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "airplay: realtime sync failed; keeping leader only");
+            let mut out = Vec::new();
+            let mut iter = names.into_iter().zip(raw.into_iter());
+            if let Some((name, client)) = iter.next() {
+                update_session(shared, &name, true, "live (realtime, pair partial)");
+                out.push(LiveClient {
+                    name,
+                    client,
+                    packets: 0,
+                });
+            }
+            for (name, mut client) in iter {
+                let _ = client.stop();
+                update_session(shared, &name, false, &format!("error: pair sync {e:#}"));
+            }
+            if out.is_empty() {
+                Err(anyhow::anyhow!("realtime begin failed: {e:#}"))
+            } else {
+                Ok(out)
+            }
+        }
+    }
+}
+
+// ---- buffered ---------------------------------------------------------------
+
+fn setup_and_begin_buffered(
     group: &[SpeakerTarget],
     volume_db: f64,
     format: &BufferedAudioFormat,
@@ -382,7 +579,7 @@ fn setup_and_begin_group(
     let mut leader_uuid = String::new();
 
     for (i, t) in group.iter().enumerate() {
-        update_session(shared, &t.name, false, "connecting…");
+        update_session(shared, &t.name, false, "connecting… (buffered)");
         let dev = device_from_target(t);
         let mut client = Client::new();
         client.set_startup_volume(volume_db);
@@ -418,6 +615,7 @@ fn setup_and_begin_group(
         staged.push(LiveClient {
             name: t.name.clone(),
             client,
+            packets: 0,
         });
     }
 
@@ -425,17 +623,15 @@ fn setup_and_begin_group(
         anyhow::bail!("all speakers in group failed connect/setup");
     }
 
-    // Arm playback: shared PTP anchor for multi-speaker groups.
     if staged.len() == 1 {
         let lc = &mut staged[0];
         lc.client
             .begin_buffered_playback()
             .map_err(|e| anyhow::anyhow!("{}: begin: {e:#}", lc.name))?;
-        update_session(shared, &lc.name, true, "live");
+        update_session(shared, &lc.name, true, "live (buffered)");
         return Ok(staged);
     }
 
-    // Stereo / multi: extract clients, begin synchronized, rebuild LiveClient list.
     let names: Vec<String> = staged.iter().map(|c| c.name.clone()).collect();
     let mut raw: Vec<Client> = staged.into_iter().map(|c| c.client).collect();
 
@@ -443,15 +639,16 @@ fn setup_and_begin_group(
         Ok(()) => {
             let mut out = Vec::with_capacity(raw.len());
             for (name, client) in names.into_iter().zip(raw.into_iter()) {
-                update_session(shared, &name, true, "live");
-                out.push(LiveClient { name, client });
+                update_session(shared, &name, true, "live (buffered)");
+                out.push(LiveClient {
+                    name,
+                    client,
+                    packets: 0,
+                });
             }
             Ok(out)
         }
         Err(e) => {
-            // Do *not* begin each speaker with an independent anchor: stereo
-            // mates that already share groupUUID/PTP reject that (status
-            // -71976). Keep only the leader with a solo begin instead.
             tracing::warn!(
                 error = %e,
                 "airplay: synchronized begin failed; keeping leader only"
@@ -465,9 +662,13 @@ fn setup_and_begin_group(
                             shared,
                             &name,
                             true,
-                            "live (pair mate failed SETRATE)",
+                            "live (buffered, pair mate failed SETRATE)",
                         );
-                        out.push(LiveClient { name, client });
+                        out.push(LiveClient {
+                            name,
+                            client,
+                            packets: 0,
+                        });
                     }
                     Err(e2) => {
                         tracing::error!(name = %name, error = %e2, "airplay: leader begin failed");
@@ -500,8 +701,6 @@ fn device_from_target(t: &SpeakerTarget) -> Device {
         .model
         .clone()
         .filter(|m| !m.is_empty())
-        // Default to HomePod family so transient pair-setup is used when mDNS
-        // did not carry a model (product path is HomePod / HomePod mini).
         .unwrap_or_else(|| "AudioAccessory".into());
     let mut features = FeatureFlags(0);
     features.0 |= 1u64 << FEATURE_SUPPORTS_AIRPLAY_AUDIO;

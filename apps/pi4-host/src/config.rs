@@ -27,6 +27,10 @@ pub struct Config {
     /// TCP port for live capture stream (`GET /capture.wav`), Android parity.
     #[serde(default = "default_stream_port")]
     pub stream_port: u16,
+    /// AirPlay transport: `"realtime"` (type 96, faster start, 16-bit) or
+    /// `"buffered"` (type 103, 24-bit PTP, higher quality / longer arm).
+    #[serde(default = "default_airplay_mode")]
+    pub airplay_mode: String,
     #[serde(default = "default_record_dir")]
     pub record_dir: PathBuf,
     #[serde(default = "default_record_min_free")]
@@ -98,6 +102,7 @@ impl Default for Config {
             bits: default_bits(),
             capture_gain_db: default_capture_gain_db(),
             stream_port: default_stream_port(),
+            airplay_mode: default_airplay_mode(),
             record_dir: default_record_dir(),
             record_min_free_bytes: default_record_min_free(),
             audio_start_threshold_db: default_start_threshold(),
@@ -171,6 +176,10 @@ fn default_capture_gain_db() -> f64 {
 }
 fn default_stream_port() -> u16 {
     8088
+}
+fn default_airplay_mode() -> String {
+    // Faster session start than buffered/PTP (user preference for vinyl).
+    "realtime".into()
 }
 fn default_record_dir() -> PathBuf {
     if cfg!(target_os = "macos") {

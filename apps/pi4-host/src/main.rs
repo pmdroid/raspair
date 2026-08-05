@@ -108,7 +108,9 @@ async fn main() -> Result<()> {
         cfg.sample_rate,
         cfg.bits,
         cfg.channels,
+        &cfg.airplay_mode,
     ));
+    tracing::info!(mode = airplay.transport_label(), "airplay transport");
     let chromecast = Arc::new(ChromecastManager::new());
 
     let http_port = parse_port(&cfg.http_bind).unwrap_or(80);
