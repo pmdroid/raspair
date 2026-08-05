@@ -31,6 +31,9 @@ pub struct SpeakerTarget {
     pub target_type: TargetType,
     #[serde(default)]
     pub model: Option<String>,
+    /// AirPlay mDNS `tsid` — non-empty + matching across two targets = stereo pair.
+    #[serde(default)]
+    pub tight_sync_id: String,
 }
 
 fn default_port() -> u16 {

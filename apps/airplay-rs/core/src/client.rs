@@ -942,12 +942,92 @@ impl Client {
             bail!("not connected");
         }
         let db = db.clamp(-144.0, 0.0);
+        self.volume_db = db;
         let path = self.rtsp_path.clone();
         let req = setup::new_set_parameter(&path, "volume", &format!("{db}"));
         let resp = self.rtsp_mut().do_request(req).context("set volume")?;
         if resp.status_code != 200 {
             bail!("set volume returned {}", resp.status_code);
         }
+        Ok(())
+    }
+
+    /// Whether a buffered stream is configured (after `setup_buffered`).
+    pub fn has_buffered(&self) -> bool {
+        self.buffered.is_some()
+    }
+
+    /// Samples per frame for the buffered stream (typically 352 for PCM24).
+    pub fn samples_per_frame(&self) -> Option<i32> {
+        self.buffered.as_ref().map(|b| b.samples_per_frame())
+    }
+
+    /// Align this client's buffered RTP clock to `other` (stereo pair lockstep).
+    /// Call after both have `setup_buffered`, before `begin_buffered_playback*`.
+    pub fn sync_buffered_clock_from(&mut self, other: &Client) -> Result<()> {
+        let (seq, rtp) = {
+            let b = other
+                .buffered
+                .as_ref()
+                .ok_or_else(|| anyhow!("other buffered stream not set up"))?;
+            (b.seq(), b.rtp_timestamp())
+        };
+        let b = self
+            .buffered
+            .as_mut()
+            .ok_or_else(|| anyhow!("buffered stream not set up"))?;
+        b.set_clock(seq, rtp);
+        Ok(())
+    }
+
+    /// Wait for PTP lock and build a shared anchor for stereo mates / live play.
+    pub fn ptp_anchor_for_playback(&self) -> Option<PtpAnchor> {
+        let lead = duration_env("AP2_ANCHOR_LEAD_MS", 4000);
+        let ptp = self.ptp.as_ref()?;
+        ptp.wait_ready(Duration::from_secs(5));
+        ptp.anchor_after(lead)
+    }
+
+    /// Arm RECORD / FLUSHBUFFERED / SETRATEANCHORTIME for continuous live frames.
+    /// Call once after `setup_buffered`, then feed with [`Client::write_buffered_frame`].
+    pub fn begin_buffered_playback(&mut self) -> Result<()> {
+        let (seq, rtp) = {
+            let b = self
+                .buffered
+                .as_ref()
+                .ok_or_else(|| anyhow!("buffered stream not set up"))?;
+            (b.seq(), b.rtp_timestamp())
+        };
+        self.start_buffered_playback(seq, rtp, None)
+    }
+
+    /// Like [`Client::begin_buffered_playback`] but reuses a PTP anchor from the
+    /// stereo-pair leader so both speakers map the same rtpTime to network time.
+    pub fn begin_buffered_playback_with_anchor(
+        &mut self,
+        shared_anchor: Option<PtpAnchor>,
+    ) -> Result<()> {
+        let (seq, rtp) = {
+            let b = self
+                .buffered
+                .as_ref()
+                .ok_or_else(|| anyhow!("buffered stream not set up"))?;
+            (b.seq(), b.rtp_timestamp())
+        };
+        self.start_buffered_playback(seq, rtp, shared_anchor)
+    }
+
+    /// Encrypt and TCP-write one pre-encoded buffered audio frame (e.g. 352×2×3
+    /// bytes of little-endian PCM24). Safe to call from a dedicated sender
+    /// thread after [`Client::begin_buffered_playback`].
+    pub fn write_buffered_frame(&mut self, payload: &[u8]) -> Result<()> {
+        let b = self
+            .buffered
+            .as_mut()
+            .ok_or_else(|| anyhow!("buffered stream not set up"))?;
+        b.write_frame(payload, false)
+            .context("write buffered frame")?;
+        feedback_if_due(self);
         Ok(())
     }
 
@@ -1051,6 +1131,39 @@ pub fn play_pcm_synchronized(clients: &mut [Client], samples: &[f32], sample_rat
             std::thread::sleep(d);
         }
         i += frame_samples;
+    }
+    Ok(())
+}
+
+/// Arm one or more buffered clients for continuous live send. Aligns RTP clocks
+/// to the first client and shares one PTP anchor (stereo / multi-room lockstep).
+/// After this returns, call [`Client::write_buffered_frame`] on each client with
+/// identical payload bytes (or drop dead clients fail-soft).
+pub fn begin_live_buffered_synchronized(clients: &mut [Client]) -> Result<()> {
+    if clients.is_empty() {
+        bail!("no clients");
+    }
+    for c in clients.iter() {
+        if c.buffered.is_none() {
+            bail!("buffered stream not set up");
+        }
+    }
+    let seq = clients[0].buffered.as_ref().unwrap().seq();
+    let rtp_time = clients[0].buffered.as_ref().unwrap().rtp_timestamp();
+    let shared_anchor = clients[0].ptp_anchor_for_playback();
+    for c in clients.iter_mut() {
+        c.buffered.as_mut().unwrap().set_clock(seq, rtp_time);
+        let (cs, cr) = {
+            let b = c.buffered.as_ref().unwrap();
+            (b.seq(), b.rtp_timestamp())
+        };
+        c.start_buffered_playback(cs, cr, shared_anchor)
+            .with_context(|| {
+                format!(
+                    "start buffered playback {}",
+                    c.device.as_ref().map(|d| d.name.as_str()).unwrap_or("?")
+                )
+            })?;
     }
     Ok(())
 }

@@ -1,8 +1,8 @@
 //! Vinyl Bridge — Raspberry Pi 4 Linux host.
 //!
 //! Same control surface as `apps/p4-bridge` (HTTP API, mDNS, capture gate,
-//! record, session manager). AirPlay 2 / Chromecast protocol stacks are
-//! scaffolded as stubs until ported from `apps/firmware/components/airplay2`.
+//! record, session manager). AirPlay 2 uses `airplay-core` (buffered pcm24-48);
+//! Chromecast remains a stub.
 //!
 //! Management: settings, auto-record (energy gate), music ID (AcoustID),
 //! collection tags, and embedded web UI at `/`.
@@ -104,7 +104,11 @@ async fn main() -> Result<()> {
     let capture = capture::start(&cfg);
     let recorder = Recorder::new(&cfg);
     let stats = Arc::new(Stats::new());
-    let airplay = Arc::new(AirplayManager::new());
+    let airplay = Arc::new(AirplayManager::new(
+        cfg.sample_rate,
+        cfg.bits,
+        cfg.channels,
+    ));
     let chromecast = Arc::new(ChromecastManager::new());
 
     let http_port = parse_port(&cfg.http_bind).unwrap_or(80);
@@ -162,6 +166,7 @@ fn target_from_cfg(t: &TargetConfig) -> SpeakerTarget {
         port: t.port,
         target_type,
         model: None,
+        tight_sync_id: String::new(),
     }
 }
 

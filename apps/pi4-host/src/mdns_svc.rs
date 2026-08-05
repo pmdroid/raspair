@@ -111,6 +111,11 @@ fn spawn_browser(
                             .get("model")
                             .or_else(|| info.get_properties().get("md"))
                             .map(|v| v.val_str().to_string());
+                        let tight_sync_id = info
+                            .get_properties()
+                            .get("tsid")
+                            .map(|v| v.val_str().to_string())
+                            .unwrap_or_default();
                         let target = SpeakerTarget {
                             name: name.clone(),
                             ip,
@@ -118,6 +123,7 @@ fn spawn_browser(
                             port,
                             target_type: target_type.clone(),
                             model,
+                            tight_sync_id,
                         };
                         seen.insert(name, target);
                         let mut list: Vec<_> = seen.values().cloned().collect();

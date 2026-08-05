@@ -17,5 +17,8 @@ pub mod stream;
 pub mod timing;
 
 pub use anyhow::{Error, Result};
-pub use client::Client;
+pub use client::{
+    begin_live_buffered_synchronized, BufferedAudioFormat, Client, StreamType,
+};
 pub use discovery::Device;
+pub use timing::{PtpAnchor, PtpClock};

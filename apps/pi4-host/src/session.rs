@@ -1,5 +1,6 @@
-//! Session manager: signal gate + play/stop intent → AirPlay / Chromecast stubs.
+//! Session manager: signal gate + play/stop intent → AirPlay / Chromecast.
 //! Optional auto-record follows the same energy gate (begin/end of music).
+//! Live capture PCM is also pushed into active AirPlay sessions.
 
 use crate::airplay::AirplayManager;
 use crate::capture::CaptureHandle;
@@ -53,6 +54,11 @@ pub async fn run(rt: SessionRuntime) {
                     got += 1;
                     rt.stats.tick_capture();
                     rt.recorder.write_pcm(&block.samples);
+                    // Live AirPlay: same capture path as recorder (wire PCM →
+                    // manager converts to pcm24-48 frames).
+                    if rt.airplay.is_active() {
+                        rt.airplay.push_pcm(&block.samples);
+                    }
                     apply_gate(
                         &rt,
                         &snap,
