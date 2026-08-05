@@ -117,6 +117,11 @@ fn duration_env(name: &str, default_ms: u64) -> Duration {
     Duration::from_millis(default_ms)
 }
 
+/// Default PTP playout lead for buffered SETRATEANCHORTIME.
+/// ESP vinyl path uses 12.5 s so stereo followers have buffer headroom;
+/// 4 s is too short and often yields SETRATE status -71976 on the mate.
+const DEFAULT_ANCHOR_LEAD_MS: u64 = 12_500;
+
 pub struct Client {
     device: Option<Device>,
     session: Option<PairingSession>,
@@ -804,7 +809,7 @@ impl Client {
     /// RECORD / FLUSHBUFFERED / SETRATEANCHORTIME to arm buffered playback at
     /// the PTP anchor.
     fn start_buffered_playback(&mut self, seq: u32, rtp_time: u32, shared_anchor: Option<PtpAnchor>) -> Result<()> {
-        let anchor_lead = duration_env("AP2_ANCHOR_LEAD_MS", 4000);
+        let anchor_lead = duration_env("AP2_ANCHOR_LEAD_MS", DEFAULT_ANCHOR_LEAD_MS);
 
         if let Some(ptp) = self.ptp.as_ref() {
             log::debug!(
@@ -817,10 +822,14 @@ impl Client {
             log::warn!("buffered playback: no PTP clock — anchor will be zero (likely silent)");
         }
 
+        // Stereo mates must keep the *same* absolute network-time anchor on every
+        // retry (ESP airplay_start_playback). Regenerating on attempt>1 desyncs
+        // the follower and often yields SETRATE status -71976.
+        let fixed_shared = shared_anchor.is_some();
         let mut anchor = if let Some(a) = shared_anchor {
             a
         } else if let Some(ptp) = self.ptp.as_ref() {
-            let ready = ptp.wait_ready(Duration::from_secs(5));
+            let ready = ptp.wait_ready(Duration::from_secs(8));
             if !ready {
                 log::warn!("PTP did not lock before buffered anchor (Delay_Resp={})", ptp.delay_responses());
             }
@@ -829,12 +838,13 @@ impl Client {
             PtpAnchor::default()
         };
         log::debug!(
-            "buffered anchor: timeline={:#x} secs={} frac={} seq={} rtpTime={}",
+            "buffered anchor: timeline={:#x} secs={} frac={} seq={} rtpTime={} shared={}",
             anchor.timeline_id,
             anchor.seconds,
             anchor.fraction,
             seq,
-            rtp_time
+            rtp_time,
+            fixed_shared
         );
 
         let record = setup::new_record_buffered(&self.rtsp_path, self.buffered_id, seq, rtp_time)?;
@@ -843,17 +853,33 @@ impl Client {
             bail!("record buffered returned {}", record_resp.status_code);
         }
 
+        // FLUSHBUFFERED: stereo followers can reject briefly while tight-sync
+        // settles — retry like ESP (up to 5 × 400 ms).
         let flush_until = (seq.wrapping_sub(1)) & 0xFF_FFFF;
-        let flush = setup::new_flush_buffered(&self.rtsp_path, 0, rtp_time, flush_until, rtp_time)?;
-        let flush_resp = self.rtsp_mut().do_request(flush).context("flush buffered")?;
-        if flush_resp.status_code != 200 {
-            bail!("flush buffered returned {}", flush_resp.status_code);
+        let mut flush_ok = false;
+        for attempt in 1..=5 {
+            let flush =
+                setup::new_flush_buffered(&self.rtsp_path, 0, rtp_time, flush_until, rtp_time)?;
+            let flush_resp = self.rtsp_mut().do_request(flush).context("flush buffered")?;
+            if flush_resp.status_code == 200 {
+                flush_ok = true;
+                break;
+            }
+            log::warn!(
+                "FLUSHBUFFERED returned {} attempt {attempt}/5",
+                flush_resp.status_code
+            );
+            std::thread::sleep(Duration::from_millis(400));
+        }
+        if !flush_ok {
+            bail!("flush buffered rejected after retries");
         }
 
         let mut last_status = 0i64;
         for attempt in 1..=5 {
-            if let Some(ptp) = self.ptp.as_ref() {
-                if shared_anchor.is_none() || attempt > 1 {
+            // Only refresh anchor for single-speaker (no shared) sessions.
+            if !fixed_shared {
+                if let Some(ptp) = self.ptp.as_ref() {
                     if let Some(a) = ptp.anchor_after(anchor_lead) {
                         anchor = a;
                     }
@@ -982,9 +1008,9 @@ impl Client {
 
     /// Wait for PTP lock and build a shared anchor for stereo mates / live play.
     pub fn ptp_anchor_for_playback(&self) -> Option<PtpAnchor> {
-        let lead = duration_env("AP2_ANCHOR_LEAD_MS", 4000);
+        let lead = duration_env("AP2_ANCHOR_LEAD_MS", DEFAULT_ANCHOR_LEAD_MS);
         let ptp = self.ptp.as_ref()?;
-        ptp.wait_ready(Duration::from_secs(5));
+        ptp.wait_ready(Duration::from_secs(8));
         ptp.anchor_after(lead)
     }
 
@@ -1148,9 +1174,27 @@ pub fn begin_live_buffered_synchronized(clients: &mut [Client]) -> Result<()> {
             bail!("buffered stream not set up");
         }
     }
+
+    // ESP multi-room: settle after SETUP before RECORD/SETRATE so tight-sync
+    // members join the timing group (PAIR_SETTLE_MS = 1500).
+    if clients.len() > 1 {
+        let settle = duration_env("AP2_PAIR_SETTLE_MS", 1500);
+        log::info!(
+            "stereo/multi: settling {:?} before shared SETRATEANCHORTIME (n={})",
+            settle,
+            clients.len()
+        );
+        std::thread::sleep(settle);
+    }
+
     let seq = clients[0].buffered.as_ref().unwrap().seq();
     let rtp_time = clients[0].buffered.as_ref().unwrap().rtp_timestamp();
     let shared_anchor = clients[0].ptp_anchor_for_playback();
+    if shared_anchor.is_none() {
+        log::warn!("begin_live_buffered_synchronized: no PTP anchor from leader");
+    }
+
+    // Arm all with the *same* seq/rtpTime/anchor (ESP airplay_start_playback loop).
     for c in clients.iter_mut() {
         c.buffered.as_mut().unwrap().set_clock(seq, rtp_time);
         let (cs, cr) = {
@@ -1183,8 +1227,8 @@ pub fn play_buffered_frames_synchronized(clients: &mut [Client], frames: Vec<Vec
             bail!("buffered stream not set up");
         }
     }
-    let anchor_lead = duration_env("AP2_ANCHOR_LEAD_MS", 4000);
-    let send_lead = duration_env("AP2_SEND_LEAD_MS", 4000);
+    let anchor_lead = duration_env("AP2_ANCHOR_LEAD_MS", DEFAULT_ANCHOR_LEAD_MS);
+    let send_lead = duration_env("AP2_SEND_LEAD_MS", DEFAULT_ANCHOR_LEAD_MS);
 
     let seq = clients[0].buffered.as_ref().unwrap().seq();
     let rtp_time = clients[0].buffered.as_ref().unwrap().rtp_timestamp();

@@ -319,6 +319,7 @@ fn update_session(shared: &RwLock<SharedState>, name: &str, active: bool, note: 
 }
 
 /// Group targets: same non-empty `tight_sync_id` → stereo pair; others alone.
+/// Within a pair, sort so the primary name (without " (2)") is leader.
 fn group_targets(targets: &[SpeakerTarget]) -> Vec<Vec<SpeakerTarget>> {
     let mut by_tsid: HashMap<String, Vec<SpeakerTarget>> = HashMap::new();
     let mut singles: Vec<Vec<SpeakerTarget>> = Vec::new();
@@ -331,10 +332,17 @@ fn group_targets(targets: &[SpeakerTarget]) -> Vec<Vec<SpeakerTarget>> {
         }
     }
     let mut out = singles;
-    for (_tsid, group) in by_tsid {
+    for (_tsid, mut group) in by_tsid {
         if group.len() >= 2 {
+            group.sort_by(|a, b| {
+                // Prefer "Living Room" over "Living Room (2)" as PTP leader.
+                let ra = stereo_rank(&a.name);
+                let rb = stereo_rank(&b.name);
+                ra.cmp(&rb).then_with(|| a.name.cmp(&b.name))
+            });
             tracing::info!(
                 n = group.len(),
+                leader = %group[0].name,
                 names = ?group.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
                 "airplay: stereo / tight-sync group"
             );
@@ -346,6 +354,15 @@ fn group_targets(targets: &[SpeakerTarget]) -> Vec<Vec<SpeakerTarget>> {
         }
     }
     out
+}
+
+fn stereo_rank(name: &str) -> u8 {
+    let n = name.to_ascii_lowercase();
+    if n.contains("(2)") || n.ends_with(" 2") || n.contains("right") {
+        1
+    } else {
+        0
+    }
 }
 
 /// Connect + setup_buffered for each target in the group (share PTP/group UUID
@@ -432,20 +449,41 @@ fn setup_and_begin_group(
             Ok(out)
         }
         Err(e) => {
-            tracing::warn!(error = %e, "airplay: synchronized begin failed; falling back per-speaker");
+            // Do *not* begin each speaker with an independent anchor: stereo
+            // mates that already share groupUUID/PTP reject that (status
+            // -71976). Keep only the leader with a solo begin instead.
+            tracing::warn!(
+                error = %e,
+                "airplay: synchronized begin failed; keeping leader only"
+            );
             let mut out = Vec::new();
-            for (name, mut client) in names.into_iter().zip(raw.into_iter()) {
+            let mut iter = names.into_iter().zip(raw.into_iter());
+            if let Some((name, mut client)) = iter.next() {
                 match client.begin_buffered_playback() {
                     Ok(()) => {
-                        update_session(shared, &name, true, "live");
+                        update_session(
+                            shared,
+                            &name,
+                            true,
+                            "live (pair mate failed SETRATE)",
+                        );
                         out.push(LiveClient { name, client });
                     }
                     Err(e2) => {
-                        tracing::error!(name = %name, error = %e2, "airplay: begin failed");
+                        tracing::error!(name = %name, error = %e2, "airplay: leader begin failed");
                         let _ = client.stop();
                         update_session(shared, &name, false, &format!("error: begin {e2:#}"));
                     }
                 }
+            }
+            for (name, mut client) in iter {
+                let _ = client.stop();
+                update_session(
+                    shared,
+                    &name,
+                    false,
+                    &format!("error: pair SETRATE {e:#}"),
+                );
             }
             if out.is_empty() {
                 Err(anyhow::anyhow!("begin failed for all speakers: {e:#}"))
