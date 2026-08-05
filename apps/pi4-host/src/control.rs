@@ -32,7 +32,8 @@ pub struct SpeakerTarget {
     #[serde(default)]
     pub model: Option<String>,
     /// AirPlay mDNS `tsid` — non-empty + matching across two targets = stereo pair.
-    #[serde(default)]
+    /// Serialized as `tsid` for ESP/Android API parity (not the Rust field name).
+    #[serde(default, rename = "tsid", alias = "tight_sync_id")]
     pub tight_sync_id: String,
 }
 

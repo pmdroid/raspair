@@ -87,7 +87,7 @@ fn spawn_browser(
             loop {
                 match receiver.recv_timeout(Duration::from_secs(30)) {
                     Ok(ServiceEvent::ServiceResolved(info)) => {
-                        let name = info.get_fullname().to_string();
+                        let fullname = info.get_fullname().to_string();
                         let port = info.get_port();
                         let ip = info
                             .get_addresses()
@@ -116,6 +116,15 @@ fn spawn_browser(
                             .get("tsid")
                             .map(|v| v.val_str().to_string())
                             .unwrap_or_default();
+                        // ESP uses mdns instance_name only ("Living Room"), not the
+                        // full "Living Room._airplay._tcp.local." FQDN. Prefer Cast
+                        // friendly name TXT `fn` when present.
+                        let name = info
+                            .get_properties()
+                            .get("fn")
+                            .map(|v| v.val_str().to_string())
+                            .filter(|s| !s.trim().is_empty())
+                            .unwrap_or_else(|| instance_display_name(&fullname));
                         let target = SpeakerTarget {
                             name: name.clone(),
                             ip,
@@ -125,7 +134,8 @@ fn spawn_browser(
                             model,
                             tight_sync_id,
                         };
-                        seen.insert(name, target);
+                        // Key by fullname so renames/updates stay stable.
+                        seen.insert(fullname, target);
                         let mut list: Vec<_> = seen.values().cloned().collect();
                         list.sort_by(|a, b| a.name.cmp(&b.name));
                         // Clone under read lock first — never upgrade read→write
@@ -154,6 +164,44 @@ fn spawn_browser(
             }
         })
         .ok();
+}
+
+/// Strip mDNS service type suffix → human instance name.
+/// `"Living Room._airplay._tcp.local."` → `"Living Room"`.
+fn instance_display_name(fullname: &str) -> String {
+    let s = fullname.trim().trim_end_matches('.');
+    if let Some(idx) = s.find("._") {
+        let inst = &s[..idx];
+        // Unescape common DNS label forms (\032 → space) if still present.
+        unescape_dns_label(inst)
+    } else {
+        s.to_string()
+    }
+}
+
+fn unescape_dns_label(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' && i + 3 < bytes.len()
+            && bytes[i + 1].is_ascii_digit()
+            && bytes[i + 2].is_ascii_digit()
+            && bytes[i + 3].is_ascii_digit()
+        {
+            let n = (bytes[i + 1] - b'0') as u32 * 100
+                + (bytes[i + 2] - b'0') as u32 * 10
+                + (bytes[i + 3] - b'0') as u32;
+            if let Some(c) = char::from_u32(n) {
+                out.push(c);
+            }
+            i += 4;
+        } else {
+            out.push(bytes[i] as char);
+            i += 1;
+        }
+    }
+    out
 }
 
 fn merge_by_type(
