@@ -477,7 +477,41 @@ struct SelectBody {
 }
 
 async fn select_post(State(st): State<AppState>, Json(body): Json<SelectBody>) -> Json<Value> {
-    st.control.set_targets(body.speakers);
+    // Android/ESP clients often omit tsid/model; fill from the live mDNS cache
+    // so stereo pairs (shared tsid) still group correctly on play.
+    let discovered = st.mdns.speakers();
+    let speakers = body
+        .speakers
+        .into_iter()
+        .map(|mut s| {
+            let hit = discovered.iter().find(|d| {
+                (!s.device_id.is_empty()
+                    && !d.device_id.is_empty()
+                    && d.device_id.eq_ignore_ascii_case(&s.device_id))
+                    || (d.ip == s.ip && d.port == s.port)
+                    || (d.name.eq_ignore_ascii_case(&s.name)
+                        && !s.name.is_empty()
+                        && d.target_type == s.target_type)
+            });
+            if let Some(d) = hit {
+                if s.tight_sync_id.trim().is_empty() && !d.tight_sync_id.is_empty() {
+                    s.tight_sync_id = d.tight_sync_id.clone();
+                }
+                if s.model.as_ref().map(|m| m.is_empty()).unwrap_or(true) {
+                    s.model = d.model.clone();
+                }
+                if s.device_id.is_empty() {
+                    s.device_id = d.device_id.clone();
+                }
+                // Prefer clean discovered name over stale/raw client names.
+                if s.name.contains("._") || s.name.ends_with(".local.") {
+                    s.name = d.name.clone();
+                }
+            }
+            s
+        })
+        .collect();
+    st.control.set_targets(speakers);
     // Return full status so Android BridgeStatus.fromJson works.
     Json(status_json(&st))
 }
