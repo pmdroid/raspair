@@ -144,7 +144,7 @@ fn status_json(st: &AppState) -> Value {
         },
         "parity": {
             "airplay2": "live",
-            "chromecast": "stub",
+            "chromecast": "ok",
             "capture": st.capture.backend(),
             "capture_features": {
                 "cpal": cfg!(feature = "cpal"),

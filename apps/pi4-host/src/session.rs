@@ -22,6 +22,10 @@ pub struct SessionRuntime {
     pub recorder: Arc<Recorder>,
     pub stats: Arc<Stats>,
     pub settings: Arc<SettingsStore>,
+    /// Main HTTP bind port (prefer `/stream.wav` for Cast media URL).
+    pub http_port: u16,
+    /// Dedicated capture-tap port (`/capture.wav`, default 8088).
+    pub stream_port: u16,
 }
 
 pub async fn run(rt: SessionRuntime) {
@@ -169,10 +173,14 @@ fn start_sessions(rt: &SessionRuntime, snap: &crate::settings::RuntimeSettings) 
         }
     }
     if !cc.is_empty() {
-        let url = "http://127.0.0.1/stream.wav"; // placeholder PCM URL
-        if let Err(e) = rt.chromecast.start(&cc, url, volume) {
+        let url = crate::chromecast::build_stream_url(rt.http_port, rt.stream_port);
+        tracing::info!(%url, "chromecast: media URL");
+        if let Err(e) = rt.chromecast.start(&cc, &url, volume) {
             tracing::error!(error = %e, "chromecast start failed");
-            return;
+            // Fail-soft relative to AirPlay: if only CC was selected, clear streaming.
+            if ap.is_empty() {
+                return;
+            }
         }
     }
     rt.control.set_streaming(true);

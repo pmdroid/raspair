@@ -135,6 +135,8 @@ async fn main() -> Result<()> {
         recorder,
         stats,
         settings,
+        http_port,
+        stream_port: cfg.stream_port,
     };
     tokio::spawn(session::run(rt));
 
