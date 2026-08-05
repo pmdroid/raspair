@@ -445,6 +445,7 @@ fn run_alsa(
 }
 
 /// Scale interleaved PCM in place. Clamps to full-scale to avoid wrap distortion.
+#[cfg(feature = "alsa")]
 fn apply_gain_inplace(pcm: &mut [u8], bits: u16, gain: f64) {
     match bits {
         16 => {
