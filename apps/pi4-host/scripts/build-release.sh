@@ -3,6 +3,7 @@
 # macOS daily loop: use `make build-macos` / `just build-macos` instead.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+APPS="$(cd "$ROOT/.." && pwd)"
 cd "$ROOT"
 mkdir -p dist
 
@@ -14,10 +15,12 @@ if [[ "$(uname -s)" == "Linux" && "$(uname -m)" == "aarch64" ]]; then
   cp -f target/release/vinyl-bridge-pi dist/vinyl-bridge-pi
   strip dist/vinyl-bridge-pi || true
 elif command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
-  log "Docker linux/arm64 native build (+alsa)"
-  # Stream sources via tar (avoids flaky bind mounts on external volumes).
-  # Build artifacts stay in named volumes for cache.
-  tar -C "$ROOT" -cf - Cargo.toml Cargo.lock src static \
+  log "Docker linux/arm64 native build (+alsa) with airplay-core path dep"
+  # Stream monorepo slice via tar (avoids flaky bind mounts on external volumes).
+  # Includes airplay-rs/core for path = "../airplay-rs/core".
+  tar -C "$APPS" -cf - \
+      pi4-host/Cargo.toml pi4-host/Cargo.lock pi4-host/src pi4-host/static \
+      airplay-rs/core \
   | docker run --rm -i --platform linux/arm64 \
       -v vinyl-pi-cargo-registry:/usr/local/cargo/registry \
       -v vinyl-pi-cargo-git:/usr/local/cargo/git \
@@ -31,7 +34,7 @@ elif command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
         DEBIAN_FRONTEND=noninteractive apt-get install -y -qq libasound2-dev pkg-config >/dev/null
         mkdir -p /build
         tar -C /build -xf -
-        cd /build
+        cd /build/pi4-host
         cargo build --release --no-default-features --features alsa
         strip /target/release/vinyl-bridge-pi || true
         file /target/release/vinyl-bridge-pi
@@ -39,7 +42,6 @@ elif command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
       '
 
   log "copying binary out of docker volume (stdout pipe; avoids flaky bind mounts)"
-  # Writing via host redirect is more reliable than mounting dist/ from /Volumes.
   docker run --rm \
     -v vinyl-pi-target:/target \
     alpine \
