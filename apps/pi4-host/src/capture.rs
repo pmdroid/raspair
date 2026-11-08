@@ -71,6 +71,12 @@ pub fn start(cfg: &Config) -> CaptureHandle {
     std::thread::Builder::new()
         .name("capture".into())
         .spawn(move || {
+            if device == "tone" {
+                *backend.write() = "tone";
+                run_generator(true, sample_rate, channels, bits, &tx, &last_rms_dbfs, &running);
+                return;
+            }
+
             // Prefer ALSA on Linux when enabled (Pi shipping path).
             #[cfg(all(feature = "alsa", target_os = "linux"))]
             {
@@ -130,7 +136,7 @@ pub fn start(cfg: &Config) -> CaptureHandle {
             }
 
             *backend.write() = "silence";
-            run_silence(sample_rate, channels, bits, &tx, &last_rms_dbfs, &running);
+            run_generator(false, sample_rate, channels, bits, &tx, &last_rms_dbfs, &running);
         })
         .expect("spawn capture thread");
 
@@ -144,7 +150,11 @@ fn frames_per_block(sample_rate: u32) -> u32 {
     (sample_rate / 100).max(48)
 }
 
-fn run_silence(
+const TONE_HZ: [f64; 2] = [440.0, 660.0];
+const TONE_AMPLITUDE: f64 = 0.25;
+
+fn run_generator(
+    tone: bool,
     sample_rate: u32,
     channels: usize,
     bits: u16,
@@ -153,25 +163,55 @@ fn run_silence(
     running: &Arc<AtomicBool>,
 ) {
     let frames = frames_per_block(sample_rate);
-    let bytes_per_sample = match bits {
-        16 => 2,
-        _ => 3,
-    };
-    let block_bytes = frames as usize * channels * bytes_per_sample;
     let period = Duration::from_secs_f64(frames as f64 / sample_rate as f64);
+    let mut next = std::time::Instant::now();
+    let mut position: u64 = 0;
 
-    tracing::info!(sample_rate, channels, bits, "capture: silence generator");
+    tracing::info!(sample_rate, channels, bits, tone, "capture: generator");
     while running.load(Ordering::Relaxed) {
-        let samples = bytes::Bytes::from(vec![0u8; block_bytes]);
-        let rms = -120.0_f64;
+        let samples = if tone {
+            tone_block(position, frames, sample_rate, channels)
+        } else {
+            vec![0.0; frames as usize * channels]
+        };
+        position += frames as u64;
+        let rms = rms_from_f32(&samples);
         *last_rms.write() = rms;
         let _ = tx.send(PcmBlock {
-            samples,
+            samples: bytes::Bytes::from(pack_wire(&samples, bits)),
             frames,
             rms_dbfs: rms,
         });
-        std::thread::sleep(period);
+        next += period;
+        std::thread::sleep(next.saturating_duration_since(std::time::Instant::now()));
     }
+}
+
+fn tone_block(start_frame: u64, frames: u32, sample_rate: u32, channels: usize) -> Vec<f32> {
+    let mut out = Vec::with_capacity(frames as usize * channels);
+    for frame in start_frame..start_frame + frames as u64 {
+        for ch in 0..channels {
+            let cycles = frame as f64 * TONE_HZ[ch % 2] / sample_rate as f64;
+            out.push((TONE_AMPLITUDE * (std::f64::consts::TAU * cycles.fract()).sin()) as f32);
+        }
+    }
+    out
+}
+
+fn pack_wire(samples: &[f32], bits: u16) -> Vec<u8> {
+    if bits == 16 {
+        let i16s: Vec<i16> = samples
+            .iter()
+            .map(|s| (s.clamp(-1.0, 1.0) * 32_767.0) as i16)
+            .collect();
+        return pack_pcm_i16(&i16s);
+    }
+    let mut out = Vec::with_capacity(samples.len() * 4);
+    for s in samples {
+        let v = (s.clamp(-1.0, 1.0) * 8_388_607.0) as i32;
+        out.extend_from_slice(&(v << 8).to_le_bytes());
+    }
+    out
 }
 
 fn pack_pcm_i16(interleaved: &[i16]) -> Vec<u8> {
@@ -511,3 +551,42 @@ fn rms_dbfs_bytes(pcm: &[u8], bits: u16) -> f64 {
 }
 
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn decode_24le(pcm: &[u8]) -> Vec<i32> {
+        pcm.chunks_exact(3)
+            .map(|c| i32::from_le_bytes([0, c[0], c[1], c[2]]) >> 8)
+            .collect()
+    }
+
+    fn rising_zero_crossings(samples: &[f32], channel: usize) -> usize {
+        let ch: Vec<f32> = samples.iter().skip(channel).step_by(2).copied().collect();
+        ch.windows(2).filter(|w| w[0] < 0.0 && w[1] >= 0.0).count()
+    }
+
+    #[test]
+    fn tone_reaches_stream_path_for_every_wire_width() {
+        let samples = tone_block(1_000, 480, 48_000, 2);
+        for bits in [16u16, 24, 32] {
+            let wire = pack_wire(&samples, bits);
+            let stream = crate::stream_tap::wire_to_stream_pcm(&wire, bits, 48_000, 2);
+            let decoded = decode_24le(&stream);
+            assert_eq!(decoded.len(), samples.len(), "bits={bits}");
+            for (got, want) in decoded.iter().zip(&samples) {
+                let want = (*want as f64 * 8_388_607.0) as i32;
+                assert!((got - want).abs() <= 512, "bits={bits} got={got} want={want}");
+            }
+        }
+    }
+
+    #[test]
+    fn tone_is_440_left_660_right_at_minus_15_dbfs() {
+        let samples = tone_block(0, 48_000, 48_000, 2);
+        assert!((439..=441).contains(&rising_zero_crossings(&samples, 0)));
+        assert!((659..=661).contains(&rising_zero_crossings(&samples, 1)));
+        assert!((rms_from_f32(&samples) + 15.05).abs() < 0.1);
+    }
+}
