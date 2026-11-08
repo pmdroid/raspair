@@ -1,0 +1,9 @@
+{
+  "title": "RaspAir instrumental sample",
+  "description": "Original synthesized plucked notes generated for this interface preview. No third-party recording is used.",
+  "durationSeconds": 24,
+  "sampleRate": 44100,
+  "bitDepth": 16,
+  "channels": 2,
+  "license": "CC0-1.0"
+}
