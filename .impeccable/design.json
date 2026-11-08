@@ -1,0 +1,286 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-11-08T23:23:55Z",
+  "title": "Design System: RaspAir",
+  "extensions": {
+    "colorMeta": {
+      "accent": {
+        "role": "primary",
+        "displayName": "Olive",
+        "tonalRamp": ["oklch(15.00% 0.0624 117.45)", "oklch(26.43% 0.0624 117.45)", "oklch(37.86% 0.0624 117.45)", "oklch(49.29% 0.0624 117.45)", "oklch(60.71% 0.0624 117.45)", "oklch(72.14% 0.0624 117.45)", "oklch(83.57% 0.0624 117.45)", "oklch(95.00% 0.0624 117.45)"]
+      },
+      "accent-hover": {
+        "role": "primary",
+        "displayName": "Deep olive",
+        "tonalRamp": ["oklch(15.00% 0.0542 117.95)", "oklch(26.43% 0.0542 117.95)", "oklch(37.86% 0.0542 117.95)", "oklch(49.29% 0.0542 117.95)", "oklch(60.71% 0.0542 117.95)", "oklch(72.14% 0.0542 117.95)", "oklch(83.57% 0.0542 117.95)", "oklch(95.00% 0.0542 117.95)"]
+      },
+      "accent-soft": {
+        "role": "primary",
+        "displayName": "Soft olive",
+        "tonalRamp": ["oklch(15.00% 0.0226 109.57)", "oklch(26.43% 0.0226 109.57)", "oklch(37.86% 0.0226 109.57)", "oklch(49.29% 0.0226 109.57)", "oklch(60.71% 0.0226 109.57)", "oklch(72.14% 0.0226 109.57)", "oklch(83.57% 0.0226 109.57)", "oklch(95.00% 0.0226 109.57)"]
+      },
+      "warm": {
+        "role": "secondary",
+        "displayName": "Terracotta",
+        "tonalRamp": ["oklch(15.00% 0.1149 42.98)", "oklch(26.43% 0.1149 42.98)", "oklch(37.86% 0.1149 42.98)", "oklch(49.29% 0.1149 42.98)", "oklch(60.71% 0.1149 42.98)", "oklch(72.14% 0.1149 42.98)", "oklch(83.57% 0.1149 42.98)", "oklch(95.00% 0.1149 42.98)"]
+      },
+      "warm-soft": {
+        "role": "secondary",
+        "displayName": "Pale terracotta",
+        "tonalRamp": ["oklch(15.00% 0.0294 67.45)", "oklch(26.43% 0.0294 67.45)", "oklch(37.86% 0.0294 67.45)", "oklch(49.29% 0.0294 67.45)", "oklch(60.71% 0.0294 67.45)", "oklch(72.14% 0.0294 67.45)", "oklch(83.57% 0.0294 67.45)", "oklch(95.00% 0.0294 67.45)"]
+      },
+      "error": {
+        "role": "secondary",
+        "displayName": "Red-brown",
+        "tonalRamp": ["oklch(15.00% 0.1189 32.24)", "oklch(26.43% 0.1189 32.24)", "oklch(37.86% 0.1189 32.24)", "oklch(49.29% 0.1189 32.24)", "oklch(60.71% 0.1189 32.24)", "oklch(72.14% 0.1189 32.24)", "oklch(83.57% 0.1189 32.24)", "oklch(95.00% 0.1189 32.24)"]
+      },
+      "ground": {
+        "role": "neutral",
+        "displayName": "Warm paper",
+        "tonalRamp": ["oklch(15.00% 0.0156 86.43)", "oklch(26.43% 0.0156 86.43)", "oklch(37.86% 0.0156 86.43)", "oklch(49.29% 0.0156 86.43)", "oklch(60.71% 0.0156 86.43)", "oklch(72.14% 0.0156 86.43)", "oklch(83.57% 0.0156 86.43)", "oklch(95.00% 0.0156 86.43)"]
+      },
+      "paper": {
+        "role": "neutral",
+        "displayName": "Light paper",
+        "tonalRamp": ["oklch(15.00% 0.0098 87.47)", "oklch(26.43% 0.0098 87.47)", "oklch(37.86% 0.0098 87.47)", "oklch(49.29% 0.0098 87.47)", "oklch(60.71% 0.0098 87.47)", "oklch(72.14% 0.0098 87.47)", "oklch(83.57% 0.0098 87.47)", "oklch(95.00% 0.0098 87.47)"]
+      },
+      "header": {
+        "role": "neutral",
+        "displayName": "Header paper",
+        "tonalRamp": ["oklch(15.00% 0.0191 93.67)", "oklch(26.43% 0.0191 93.67)", "oklch(37.86% 0.0191 93.67)", "oklch(49.29% 0.0191 93.67)", "oklch(60.71% 0.0191 93.67)", "oklch(72.14% 0.0191 93.67)", "oklch(83.57% 0.0191 93.67)", "oklch(95.00% 0.0191 93.67)"]
+      },
+      "ink": {
+        "role": "neutral",
+        "displayName": "Olive ink",
+        "tonalRamp": ["oklch(15.00% 0.0175 125.03)", "oklch(26.43% 0.0175 125.03)", "oklch(37.86% 0.0175 125.03)", "oklch(49.29% 0.0175 125.03)", "oklch(60.71% 0.0175 125.03)", "oklch(72.14% 0.0175 125.03)", "oklch(83.57% 0.0175 125.03)", "oklch(95.00% 0.0175 125.03)"]
+      },
+      "muted": {
+        "role": "neutral",
+        "displayName": "Muted ink",
+        "tonalRamp": ["oklch(15.00% 0.0229 113.35)", "oklch(26.43% 0.0229 113.35)", "oklch(37.86% 0.0229 113.35)", "oklch(49.29% 0.0229 113.35)", "oklch(60.71% 0.0229 113.35)", "oklch(72.14% 0.0229 113.35)", "oklch(83.57% 0.0229 113.35)", "oklch(95.00% 0.0229 113.35)"]
+      },
+      "line": {
+        "role": "neutral",
+        "displayName": "Paper rule",
+        "tonalRamp": ["oklch(15.00% 0.0168 91.57)", "oklch(26.43% 0.0168 91.57)", "oklch(37.86% 0.0168 91.57)", "oklch(49.29% 0.0168 91.57)", "oklch(60.71% 0.0168 91.57)", "oklch(72.14% 0.0168 91.57)", "oklch(83.57% 0.0168 91.57)", "oklch(95.00% 0.0168 91.57)"]
+      },
+      "recording": {
+        "role": "neutral",
+        "displayName": "Recording olive",
+        "tonalRamp": ["oklch(15.00% 0.0253 109.34)", "oklch(26.43% 0.0253 109.34)", "oklch(37.86% 0.0253 109.34)", "oklch(49.29% 0.0253 109.34)", "oklch(60.71% 0.0253 109.34)", "oklch(72.14% 0.0253 109.34)", "oklch(83.57% 0.0253 109.34)", "oklch(95.00% 0.0253 109.34)"]
+      },
+      "recording-muted": {
+        "role": "neutral",
+        "displayName": "Recording ink",
+        "tonalRamp": ["oklch(15.00% 0.0309 114.48)", "oklch(26.43% 0.0309 114.48)", "oklch(37.86% 0.0309 114.48)", "oklch(49.29% 0.0309 114.48)", "oklch(60.71% 0.0309 114.48)", "oklch(72.14% 0.0309 114.48)", "oklch(83.57% 0.0309 114.48)", "oklch(95.00% 0.0309 114.48)"]
+      },
+      "nav-active": {
+        "role": "primary",
+        "displayName": "Selected olive",
+        "tonalRamp": ["oklch(15.00% 0.0294 111.20)", "oklch(26.43% 0.0294 111.20)", "oklch(37.86% 0.0294 111.20)", "oklch(49.29% 0.0294 111.20)", "oklch(60.71% 0.0294 111.20)", "oklch(72.14% 0.0294 111.20)", "oklch(83.57% 0.0294 111.20)", "oklch(95.00% 0.0294 111.20)"]
+      },
+      "focus": {
+        "role": "secondary",
+        "displayName": "Amber focus",
+        "tonalRamp": ["oklch(15.00% 0.1112 74.37)", "oklch(26.43% 0.1112 74.37)", "oklch(37.86% 0.1112 74.37)", "oklch(49.29% 0.1112 74.37)", "oklch(60.71% 0.1112 74.37)", "oklch(72.14% 0.1112 74.37)", "oklch(83.57% 0.1112 74.37)", "oklch(95.00% 0.1112 74.37)"]
+      },
+      "on-accent": {
+        "role": "neutral",
+        "displayName": "Light control text",
+        "tonalRamp": ["oklch(15.00% 0.0106 100.82)", "oklch(26.43% 0.0106 100.82)", "oklch(37.86% 0.0106 100.82)", "oklch(49.29% 0.0106 100.82)", "oklch(60.71% 0.0106 100.82)", "oklch(72.14% 0.0106 100.82)", "oklch(83.57% 0.0106 100.82)", "oklch(95.00% 0.0106 100.82)"]
+      }
+    },
+    "typographyMeta": {
+      "display": {
+        "displayName": "Display",
+        "purpose": "Recording timer with tabular numerals."
+      },
+      "headline": {
+        "displayName": "Headline",
+        "purpose": "Page heading."
+      },
+      "title": {
+        "displayName": "Title",
+        "purpose": "Current song title and setup heading."
+      },
+      "section": {
+        "displayName": "Section",
+        "purpose": "Panel and section heading."
+      },
+      "body": {
+        "displayName": "Body",
+        "purpose": "Paragraph and supporting explanation."
+      },
+      "label": {
+        "displayName": "Label",
+        "purpose": "Button and song-row label."
+      },
+      "field-label": {
+        "displayName": "Field label",
+        "purpose": "Field label and speaker name."
+      },
+      "caption": {
+        "displayName": "Caption",
+        "purpose": "Metadata and helper text."
+      }
+    },
+    "shadows": [
+      {
+        "name": "toast",
+        "value": "0 8px 28px #3e423826",
+        "purpose": "Soft lift beneath the floating toast."
+      }
+    ],
+    "motion": [
+      {
+        "name": "control-transition",
+        "value": "160ms ease-out",
+        "purpose": "Button colors and switch thumb movement; disabled for reduced motion."
+      },
+      {
+        "name": "recording-start",
+        "value": "420ms cubic-bezier(0.16, 1, 0.3, 1)",
+        "purpose": "Recording dot reveal; disabled for reduced motion."
+      }
+    ],
+    "breakpoints": [
+      {
+        "name": "phone",
+        "value": "700px"
+      },
+      {
+        "name": "compact-artwork",
+        "value": "900px"
+      },
+      {
+        "name": "compact-library",
+        "value": "1150px"
+      },
+      {
+        "name": "stacked-workspace",
+        "value": "1200px"
+      }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "Olive control for starting or applying an action.",
+      "html": "<button class=\"ds-button-primary\">Record now</button>",
+      "css": ".ds-button-primary{display:inline-flex;align-items:center;justify-content:center;gap:9px;padding:11px 16px;min-height:42px;border:1px solid var(--line,#dedace);border-radius:8px;font-family:\"Manrope Variable\",sans-serif;font-size:13px;font-weight:650;cursor:pointer;transition:background 160ms ease-out,color 160ms ease-out;background:var(--accent,#646c42);color:#fffef6;border-color:transparent;}.ds-button-primary:hover{background:#4e5532;color:#ffffff;}.ds-button-primary:focus-visible{outline:3px solid #ba873b;outline-offset:3px;}.ds-button-primary:disabled{opacity:.45;cursor:not-allowed;}@media(prefers-reduced-motion:reduce){.ds-button-primary{transition:none;}}"
+    },
+    {
+      "name": "Secondary button",
+      "kind": "button",
+      "refersTo": "button-secondary",
+      "description": "Paper control for supporting actions.",
+      "html": "<button class=\"ds-button-secondary\">Device setup</button>",
+      "css": ".ds-button-secondary{display:inline-flex;align-items:center;justify-content:center;gap:9px;padding:11px 16px;min-height:42px;border:1px solid var(--line,#dedace);border-radius:8px;font-family:\"Manrope Variable\",sans-serif;font-size:13px;font-weight:650;cursor:pointer;transition:background 160ms ease-out,color 160ms ease-out;background:var(--paper,#fffcf5);color:var(--ink,#3e4238);border-color:var(--line,#dedace);}.ds-button-secondary:hover{background:var(--accent-soft,#e6e7d6);color:var(--ink,#3e4238);}.ds-button-secondary:focus-visible{outline:3px solid #ba873b;outline-offset:3px;}.ds-button-secondary:disabled{opacity:.45;cursor:not-allowed;}@media(prefers-reduced-motion:reduce){.ds-button-secondary{transition:none;}}"
+    },
+    {
+      "name": "Stop recording button",
+      "kind": "button",
+      "refersTo": "button-record-stop",
+      "description": "Warm control for stopping an active recording.",
+      "html": "<button class=\"ds-button-record-stop\">Stop recording</button>",
+      "css": ".ds-button-record-stop{display:inline-flex;align-items:center;justify-content:center;gap:9px;padding:11px 16px;min-height:42px;border:1px solid var(--line,#dedace);border-radius:8px;font-family:\"Manrope Variable\",sans-serif;font-size:13px;font-weight:650;cursor:pointer;transition:background 160ms ease-out,color 160ms ease-out;background:#fff9f3;color:#9a4434;border-color:#d5b5a5;}.ds-button-record-stop:hover{background:var(--accent-soft,#e6e7d6);color:#9a4434;}.ds-button-record-stop:focus-visible{outline:3px solid #ba873b;outline-offset:3px;}.ds-button-record-stop:disabled{opacity:.45;cursor:not-allowed;}@media(prefers-reduced-motion:reduce){.ds-button-record-stop{transition:none;}}"
+    },
+    {
+      "name": "Text action",
+      "kind": "button",
+      "refersTo": "button-text",
+      "description": "Unfilled action beside a section heading.",
+      "html": "<button class=\"ds-button-text\">Open library <svg aria-hidden=\"true\" width=\"16\" height=\"16\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M5 12h14m-7-7 7 7-7 7\"/></svg></button>",
+      "css": ".ds-button-text{display:inline-flex;align-items:center;justify-content:center;gap:9px;padding:11px 16px;min-height:42px;border:1px solid var(--line,#dedace);border-radius:8px;font-family:\"Manrope Variable\",sans-serif;font-size:13px;font-weight:650;cursor:pointer;transition:background 160ms ease-out,color 160ms ease-out;min-height:32px;padding:4px 0;border:none;background:transparent;color:var(--accent,#646c42);font-size:11px;}.ds-button-text:hover{color:var(--ink,#3e4238);}.ds-button-text:focus-visible{outline:3px solid #ba873b;outline-offset:3px;}@media(prefers-reduced-motion:reduce){.ds-button-text{transition:none;}}"
+    },
+    {
+      "name": "Labeled field",
+      "kind": "input",
+      "refersTo": "field",
+      "description": "Paper field for song metadata, with a persistent label.",
+      "html": "<label class=\"ds-field\"><span>Song title</span><input value=\"A little further\" autocomplete=\"off\"></label>",
+      "css": ".ds-field{display:grid;gap:8px;max-width:340px;font-family:\"Manrope Variable\",sans-serif;font-size:12px;color:var(--ink,#3e4238);}.ds-field>span{font-weight:650;}.ds-field input{width:100%;min-height:44px;border:1px solid #d5d3c2;border-radius:7px;background:var(--paper,#fffcf5);color:var(--ink,#3e4238);padding:10px 12px;font-family:inherit;font-size:13px;caret-color:var(--accent,#646c42);}.ds-field input::placeholder{color:var(--muted,#6c6e5f);}.ds-field input:focus-visible{outline:3px solid #ba873b;outline-offset:3px;}@media(max-width:700px){.ds-field input{font-size:16px;}}"
+    },
+    {
+      "name": "Main navigation",
+      "kind": "nav",
+      "refersTo": "navigation",
+      "description": "Horizontal navigation with an olive current-page state.",
+      "html": "<nav class=\"ds-navigation\" aria-label=\"Main navigation\"><button class=\"ds-nav-item\" aria-current=\"page\" aria-label=\"Listen\"><svg aria-hidden=\"true\" width=\"18\" height=\"18\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><circle cx=\"12\" cy=\"12\" r=\"2\"/><path d=\"M16.24 7.76a6 6 0 0 1 0 8.48M7.76 16.24a6 6 0 0 1 0-8.48M19.07 4.93a10 10 0 0 1 0 14.14M4.93 19.07a10 10 0 0 1 0-14.14\"/></svg><span>Listen</span></button><button class=\"ds-nav-item\" aria-label=\"Recordings\"><svg aria-hidden=\"true\" width=\"18\" height=\"18\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\"><path d=\"M4 6v14M8 4v16M12 2v18m4-18 4 16\"/></svg><span>Recordings</span></button></nav>",
+      "css": ".ds-navigation{display:flex;gap:6px;background:#ebe7d9;padding:12px;}.ds-nav-item{display:inline-flex;align-items:center;justify-content:center;gap:9px;padding:11px 16px;min-height:42px;border:1px solid var(--line,#dedace);border-radius:8px;font-family:\"Manrope Variable\",sans-serif;font-size:13px;font-weight:650;cursor:pointer;transition:background 160ms ease-out,color 160ms ease-out;gap:8px;padding:10px 15px;border:none;background:transparent;color:#6c6e5f;font-size:12px;}.ds-nav-item:hover,.ds-nav-item[aria-current=\"page\"]{color:var(--ink,#3e4238);background:#dfe1cb;}.ds-nav-item:focus-visible{outline:3px solid #ba873b;outline-offset:3px;}@media(max-width:700px){.ds-nav-item{width:38px;padding:9px;}.ds-nav-item>span{display:none;}}@media(prefers-reduced-motion:reduce){.ds-nav-item{transition:none;}}"
+    },
+    {
+      "name": "Input status",
+      "kind": "chip",
+      "refersTo": "status",
+      "description": "Text and an olive dot identify the input state.",
+      "html": "<span class=\"ds-status\"><span class=\"ds-status-dot\" aria-hidden=\"true\"></span>Input active</span>",
+      "css": ".ds-status{display:inline-flex;gap:7px;align-items:center;color:#5a613c;font-family:\"Manrope Variable\",sans-serif;font-size:11px;padding:7px 10px;background:#e5e6d4;border-radius:6px;white-space:nowrap;}.ds-status-dot{width:6px;height:6px;border-radius:50%;background:#7a8757;}"
+    },
+    {
+      "name": "Paper panel",
+      "kind": "card",
+      "refersTo": "panel",
+      "description": "Flat container for a related set of audio controls.",
+      "html": "<section class=\"ds-panel\"><h2>Live input</h2><p>48 kHz · 24 bit · Stereo</p></section>",
+      "css": ".ds-panel{padding:24px;border:1px solid var(--line,#dedace);border-radius:14px;background:var(--paper,#fffcf5);color:var(--ink,#3e4238);font-family:\"Manrope Variable\",sans-serif;}.ds-panel h2{margin:0;font-size:15px;font-weight:750;}.ds-panel p{margin:8px 0 0;color:var(--muted,#6c6e5f);font-size:13px;line-height:1.7;}@media(max-width:700px){.ds-panel{padding:20px;}}"
+    },
+    {
+      "name": "Recording switch",
+      "kind": "custom",
+      "refersTo": "toggle",
+      "description": "Native checkbox with an olive track when enabled.",
+      "html": "<label class=\"ds-toggle\"><span>Record automatically</span><input type=\"checkbox\"><span class=\"ds-switch-track\" aria-hidden=\"true\"></span></label>",
+      "css": ".ds-toggle{position:relative;display:flex;align-items:center;justify-content:space-between;gap:16px;min-height:38px;max-width:310px;font-family:\"Manrope Variable\",sans-serif;font-size:11px;color:var(--ink,#3e4238);cursor:pointer;}.ds-toggle input{position:absolute;width:33px;height:20px;right:0;opacity:0;cursor:pointer;}.ds-switch-track{width:33px;height:20px;flex-shrink:0;border-radius:20px;background:#b7c3b1;padding:3px;box-sizing:border-box;}.ds-switch-track::after{content:\"\";display:block;width:14px;height:14px;background:#fff;border-radius:50%;transition:transform 160ms ease-out;}.ds-toggle input:checked+.ds-switch-track{background:var(--accent,#646c42);}.ds-toggle input:checked+.ds-switch-track::after{transform:translateX(13px);}.ds-toggle input:focus-visible+.ds-switch-track{outline:3px solid var(--warm,#a25331);outline-offset:3px;}@media(prefers-reduced-motion:reduce){.ds-switch-track::after{transition:none;}}"
+    },
+    {
+      "name": "Retained opening waveform",
+      "kind": "custom",
+      "refersTo": "waveform",
+      "description": "The retained opening uses terracotta bars and a pale warm fill.",
+      "html": "<svg class=\"ds-waveform\" viewBox=\"0 0 720 132\" preserveAspectRatio=\"none\" role=\"img\"><title>Sample audio waveform with the retained opening highlighted</title><rect width=\"108\" height=\"132\" fill=\"var(--warm-soft,#f2e1d0)\"/><path d=\"M2.5,63.50v5.00 M7.5,58.57v14.85 M12.5,56.18v19.63 M17.5,57.49v17.02 M22.5,61.68v8.63 M27.5,60.51v10.98 M32.5,57.56v16.89 M37.5,57.76v16.48 M42.5,60.68v10.63 M47.5,62.49v7.02 M52.5,59.80v12.40 M57.5,59.39v13.21 M62.5,61.00v10.00 M67.5,63.31v5.38 M72.5,62.10v7.80 M77.5,61.89v8.22 M82.5,62.65v6.69 M87.5,63.40v5.20 M92.5,63.36v5.28 M97.5,62.57v6.87 M102.5,61.85v8.29 M107.5,55.84v20.32\" fill=\"none\" stroke=\"var(--warm,#a25331)\" stroke-width=\"3\" stroke-linecap=\"round\"/><path d=\"M112.5,61.20v9.61 M117.5,47.65v36.71 M122.5,39.05v53.90 M127.5,42.74v46.51 M132.5,59.55v12.91 M137.5,44.95v42.10 M142.5,28.94v74.13 M147.5,29.51v72.98 M152.5,48.33v35.33 M157.5,50.16v31.68 M162.5,26.66v78.69 M167.5,20.99v90.01 M172.5,36.86v58.27 M177.5,60.54v10.91 M182.5,32.48v67.04 M187.5,20.37v91.27 M192.5,29.99v72.03 M197.5,55.57v20.85 M202.5,43.70v44.60 M207.5,27.92v76.16 M212.5,30.89v70.23 M217.5,49.04v33.91 M222.5,55.65v20.70 M227.5,40.97v50.07 M232.5,39.88v52.24 M237.5,50.08v31.84 M242.5,63.46v5.08 M247.5,54.84v22.33 M252.5,54.30v23.40 M257.5,59.04v13.92 M262.5,63.13v5.73 M267.5,62.37v7.25 M272.5,57.51v16.97 M277.5,53.70v24.60 M282.5,56.46v19.09 M287.5,59.97v12.07 M292.5,46.49v39.01 M297.5,38.80v54.40 M302.5,43.81v44.37 M307.5,61.58v8.84 M312.5,42.98v46.03 M317.5,28.18v75.63 M322.5,30.56v70.89 M327.5,50.79v30.42 M332.5,47.51v36.97 M337.5,25.23v81.54 M342.5,21.60v88.79 M347.5,39.25v53.50 M352.5,57.60v16.80 M357.5,30.50v71.00 M362.5,20.35v91.30 M367.5,31.88v68.25 M372.5,58.31v15.37 M377.5,41.54v48.91 M382.5,27.38v77.24 M387.5,32.07v67.86 M392.5,51.15v29.70 M397.5,53.81v24.39 M402.5,40.26v51.47 M407.5,40.45v51.10 M412.5,51.34v29.32 M417.5,62.35v7.30 M422.5,54.45v23.11 M427.5,54.60v22.79 M432.5,59.54v12.91 M437.5,63.30v5.40 M442.5,62.04v7.93 M447.5,57.02v17.97 M452.5,53.62v24.76 M457.5,57.14v17.71 M462.5,58.71v14.58 M467.5,45.39v41.22 M472.5,38.67v54.66 M477.5,45.00v41.99 M482.5,63.35v5.31 M487.5,41.09v49.83 M492.5,27.59v76.82 M497.5,31.77v68.47 M502.5,53.32v25.35 M507.5,44.93v42.15 M512.5,23.98v84.05 M517.5,22.41v87.18 M522.5,41.75v48.50 M527.5,54.68v22.63 M532.5,28.68v74.64 M537.5,20.53v90.94 M542.5,33.90v64.20 M547.5,61.06v9.88 M552.5,39.51v52.99 M557.5,27.02v77.97 M562.5,33.39v65.23 M567.5,53.28v25.43 M572.5,52.04v27.92 M577.5,39.69v52.62 M582.5,41.12v49.76 M587.5,52.63v26.75 M592.5,61.30v9.41 M597.5,54.13v23.74 M602.5,54.95v22.10 M607.5,60.03v11.93 M612.5,63.41v5.17 M617.5,61.67v8.67 M622.5,56.53v18.94 M627.5,53.60v24.80 M632.5,57.90v16.19 M637.5,57.43v17.14 M642.5,44.35v43.30 M647.5,38.66v54.69 M652.5,46.31v39.39 M657.5,61.23v9.53 M662.5,39.27v53.46 M667.5,27.16v77.68 M672.5,33.14v65.73 M677.5,55.92v20.15 M682.5,42.41v47.18 M687.5,22.90v86.21 M692.5,23.40v85.19 M697.5,44.35v43.29 M702.5,51.81v28.38 M707.5,27.02v77.96 M712.5,20.91v90.18 M717.5,36.05v59.90\" fill=\"none\" stroke=\"var(--accent,#646c42)\" stroke-width=\"3\" stroke-linecap=\"round\"/><line x1=\"108\" x2=\"108\" y1=\"0\" y2=\"132\" stroke=\"var(--warm,#a25331)\" stroke-width=\"1.5\" stroke-dasharray=\"3 3\"/></svg>",
+      "css": ".ds-waveform{display:block;width:100%;height:118px;}@media(max-width:700px){.ds-waveform{height:84px;}}"
+    }
+  ],
+  "narrative": {
+    "northStar": "Listening room",
+    "overview": "Warm paper colors, olive controls, and Manrope text frame the music. Fine borders separate tasks, while the retained opening in the waveform gives terracotta a specific audio meaning.\n\nThe interface keeps song information beside the controls that affect it. Geometric record sleeves identify tracks; compact labels and tabular timers support listening, recording, and review.",
+    "keyCharacteristics": [
+      "Flat paper-colored panels with fine borders.",
+      "Olive actions and selected states.",
+      "Terracotta audio boundaries and retained openings.",
+      "Manrope headings, compact controls, and tabular timers."
+    ],
+    "rules": [
+      {
+        "name": "The audio color rule",
+        "body": "Use olive for controls and the main waveform. Use terracotta for the retained opening and boundary markers.",
+        "section": "colors"
+      },
+      {
+        "name": "The stable timer rule",
+        "body": "Use tabular numerals for elapsed time, playback position, and waveform labels.",
+        "section": "typography"
+      },
+      {
+        "name": "The flat panel rule",
+        "body": "Separate panels with paper tones and fine borders. Reserve the soft shadow for the floating toast.",
+        "section": "elevation"
+      }
+    ],
+    "dos": [
+      "Do keep playback and recording states visually distinct.",
+      "Do retain the terracotta opening highlight and the geometric record sleeves.",
+      "Do keep Review visible for songs awaiting review on phones.",
+      "Do use the darker recording captions on the olive recording panel.",
+      "Do preserve visible keyboard focus and reduced-motion behavior."
+    ],
+    "donts": [
+      "Don't use shadows to separate ordinary panels.",
+      "Don't turn the record-sleeve artwork into a rounded card.",
+      "Don't hide an unreviewed song's action behind its status dot."
+    ]
+  }
+}
