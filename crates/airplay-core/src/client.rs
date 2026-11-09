@@ -148,6 +148,7 @@ pub struct Client {
     ptp: Option<Arc<PtpClock>>,
     events: Option<EventChannel>,
     last_feedback: Instant,
+    pub(crate) deadline: Option<(Instant, crate::session::Cancellation)>,
 }
 
 impl Default for Client {
@@ -183,7 +184,36 @@ impl Client {
             ptp: None,
             events: None,
             last_feedback: Instant::now(),
+            deadline: None,
         }
+    }
+
+    fn dial_event(&self, addr: &str, port: u16) -> Result<TcpStream> {
+        if self.deadline.is_none() { return Ok(TcpStream::connect((addr, port))?); }
+        let target = std::net::SocketAddr::new(addr.parse()?, port);
+        loop {
+            match TcpStream::connect_timeout(&target, self.remaining(Duration::from_millis(20))?) {
+                Ok(s) => return Ok(s),
+                Err(e) if matches!(e.kind(), std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock) => {},
+                Err(e) => return Err(e.into()),
+            }
+        }
+    }
+
+    fn remaining(&self, duration: Duration) -> Result<Duration> {
+        if let Some((end, cancel)) = &self.deadline {
+            anyhow::ensure!(!cancel.is_cancelled(), "cancelled");
+            return Ok(duration.min(end.checked_duration_since(Instant::now()).ok_or_else(|| anyhow!("deadline expired"))?));
+        }
+        Ok(duration)
+    }
+
+    fn wait(&self, duration: Duration) -> Result<()> {
+        let end = Instant::now() + duration;
+        while Instant::now() < end {
+            std::thread::sleep(self.remaining(end.saturating_duration_since(Instant::now()).min(Duration::from_millis(2)))?);
+        }
+        Ok(())
     }
 
     pub fn set_startup_volume(&mut self, db: f64) {
@@ -257,10 +287,14 @@ impl Client {
     /// pair-setup for HomePods, pair-verify for paired Apple TVs), and switch
     /// the connection to the AirPlay 2 channel cipher.
     pub fn connect(&mut self, dev: &Device, pin: &str) -> Result<()> {
+        let addr = dev.ip().ok_or_else(|| anyhow!("no IP address for device"))?;
+        let rtsp = RtspClient::connect(&addr, dev.port).context("RTSP connect")?;
+        self.connect_transport(dev, pin, rtsp)
+    }
+
+    pub(crate) fn connect_transport(&mut self, dev: &Device, pin: &str, mut rtsp: RtspClient) -> Result<()> {
         self.device = Some(dev.clone());
         let addr = dev.ip().ok_or_else(|| anyhow!("no IP address for device"))?;
-
-        let mut rtsp = RtspClient::connect(&addr, dev.port).context("RTSP connect")?;
         let mut session = PairingSession::new(&dev.record.device_id, pin);
 
         if dev.is_homepod() {
@@ -292,7 +326,7 @@ impl Client {
 
         let info = rtsp.info().context("RTSP info")?;
         if info.status_code != 200 {
-            bail!("RTSP info returned {}", info.status_code);
+            return Err(crate::session::SessionError::ReceiverRejected { status: info.status_code as u16 }.into());
         }
 
         self.session = Some(session);
@@ -622,11 +656,7 @@ impl Client {
         };
         let base_resp = self.rtsp_mut().do_request(base_req).context("session SETUP")?;
         if base_resp.status_code != 200 {
-            bail!(
-                "session SETUP returned {} ({})",
-                base_resp.status_code,
-                String::from_utf8_lossy(&base_resp.body)
-            );
+            return Err(crate::session::SessionError::ReceiverRejected { status: base_resp.status_code as u16 }.into());
         }
         let base = setup::parse_setup_base_response(&base_resp).context("parse base SETUP")?;
         log::debug!(
@@ -636,7 +666,7 @@ impl Client {
         );
 
         if base.event_port > 0 {
-            match EventChannel::start(&addr, base.event_port as u16, &self.shared_secret) {
+            match self.dial_event(&addr, base.event_port as u16).and_then(|stream| EventChannel::start(stream, &self.shared_secret)) {
                 Ok(ev) => self.events = Some(ev),
                 Err(e) => log::warn!("event channel failed (continuing): {e}"),
             }
@@ -716,11 +746,7 @@ impl Client {
         )?;
         let stream_resp = self.rtsp_mut().do_request(stream_req).context("stream SETUP")?;
         if stream_resp.status_code != 200 {
-            bail!(
-                "stream SETUP returned {} ({})",
-                stream_resp.status_code,
-                String::from_utf8_lossy(&stream_resp.body)
-            );
+            return Err(crate::session::SessionError::ReceiverRejected { status: stream_resp.status_code as u16 }.into());
         }
         let sr = setup::parse_setup_response(&stream_resp)?;
         let s = setup::find_stream(&sr, stream_type as i64)?;
@@ -829,7 +855,9 @@ impl Client {
         let mut anchor = if let Some(a) = shared_anchor {
             a
         } else if let Some(ptp) = self.ptp.as_ref() {
-            let ready = ptp.wait_ready(Duration::from_secs(8));
+            let end = Instant::now() + Duration::from_secs(8);
+            while !ptp.ready() && Instant::now() < end { self.wait(Duration::from_millis(2))?; }
+            let ready = ptp.ready();
             if !ready {
                 log::warn!("PTP did not lock before buffered anchor (Delay_Resp={})", ptp.delay_responses());
             }
@@ -869,7 +897,7 @@ impl Client {
                 "FLUSHBUFFERED returned {} attempt {attempt}/5",
                 flush_resp.status_code
             );
-            std::thread::sleep(Duration::from_millis(400));
+            self.wait(Duration::from_millis(400))?;
         }
         if !flush_ok {
             bail!("flush buffered rejected after retries");
@@ -903,7 +931,7 @@ impl Client {
             }
             last_status = status;
             log::warn!("SETRATEANCHORTIME status {status} on attempt {attempt}");
-            std::thread::sleep(Duration::from_secs(1));
+            self.wait(Duration::from_secs(1))?;
         }
         bail!("set rate anchor time rejected with status {last_status}")
     }
@@ -1109,10 +1137,12 @@ impl Client {
         if let Some(p) = self.ptp.as_ref() {
             p.stop();
         }
-        if !self.rtsp_path.is_empty() {
+        if !self.rtsp_path.is_empty() && self.rtsp.is_some() {
             let path = self.rtsp_path.clone();
             let _ = self.rtsp_mut().do_request(setup::new_teardown(&path));
         }
+        self.rtsp = None;
+        self.rtsp_path.clear();
         Ok(())
     }
 }
@@ -1358,23 +1388,26 @@ pub fn play_buffered_frames_synchronized(clients: &mut [Client], frames: Vec<Vec
 struct EventChannel {
     done: Arc<AtomicBool>,
     handle: Option<std::thread::JoinHandle<()>>,
+    socket: TcpStream,
 }
 
 impl EventChannel {
-    fn start(addr: &str, port: u16, shared_secret: &[u8]) -> Result<Self> {
-        let stream = TcpStream::connect(format!("{addr}:{port}")).context("dial event port")?;
+    fn start(stream: TcpStream, shared_secret: &[u8]) -> Result<Self> {
         let cipher = crate::pairing::ChannelCipher::new_event(shared_secret);
         let done = Arc::new(AtomicBool::new(false));
         let done_c = done.clone();
+        let socket = stream.try_clone()?;
         let handle = std::thread::spawn(move || event_loop(stream, cipher, done_c));
         Ok(Self {
             done,
             handle: Some(handle),
+            socket,
         })
     }
 
     fn stop(&mut self) {
         self.done.store(true, Ordering::Relaxed);
+        let _ = self.socket.shutdown(std::net::Shutdown::Both);
         if let Some(h) = self.handle.take() {
             let _ = h.join();
         }
