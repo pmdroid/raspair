@@ -1,4 +1,5 @@
 [package]
+publish = false
 name = "airplay-core"
 description = "AirPlay 2 client core: pairing, RTSP, realtime + buffered audio streams"
 version = "0.1.0"

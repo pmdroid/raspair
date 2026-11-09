@@ -33,6 +33,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "airplay-cli"
+version = "0.1.0"
+dependencies = [
+ "airplay-core",
+ "anyhow",
+ "log",
+]
+
+[[package]]
 name = "airplay-core"
 version = "0.1.0"
 dependencies = [

@@ -1,0 +1,10 @@
+[workspace]
+resolver = "2"
+members = ["apps/pi4-host", "crates/airplay-core", "apps/airplay-rs/cli"]
+default-members = ["apps/pi4-host", "crates/airplay-core"]
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+opt-level = 3

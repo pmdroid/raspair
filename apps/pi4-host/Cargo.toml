@@ -49,14 +49,8 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 native-tls = "0.2"
 
 # AirPlay 2 sender (buffered PCM24 @ 48 kHz — same path as ESP STREAM_CODEC)
-airplay-core = { path = "../airplay-rs/core" }
+airplay-core = { path = "../../crates/airplay-core" }
 
 # Optional capture backends
 cpal = { version = "0.15", optional = true }
 alsa = { version = "0.9", optional = true }
-
-[profile.release]
-lto = true
-codegen-units = 1
-strip = true
-opt-level = 3
