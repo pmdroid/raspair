@@ -34,13 +34,7 @@ jobs:
         with:
           version: 2026.9.11
       - name: Test Rust packages
-        run: |
-          if [[ -f Cargo.toml ]]; then
-            cargo test --locked --workspace --all-targets
-          else
-            cargo test --locked --manifest-path apps/pi4-host/Cargo.toml --all-targets
-            cargo test --locked --manifest-path apps/airplay-rs/Cargo.toml --workspace --all-targets
-          fi
+        run: cargo test --locked --workspace --all-targets
       - name: Test ALSA capture
         run: cargo test --locked --manifest-path apps/pi4-host/Cargo.toml --no-default-features --features alsa --all-targets
 
