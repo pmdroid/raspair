@@ -16,7 +16,7 @@ HTTP_BIND ?= 127.0.0.1:8080
 help:
 	@echo "Targets:"
 	@echo "  build-macos        native macOS binary (default features = cpal/CoreAudio)"
-	@echo "  run-macos          cargo run --features cpal on $(HTTP_BIND)"
+	@echo "  run-macos          cargo run --locked -p vinyl-bridge-pi --no-default-features --features cpal on $(HTTP_BIND)"
 	@echo "  build-pi           aarch64-linux + ALSA → dist/vinyl-bridge-pi (Docker)"
 	@echo "  qemu-smoke         scripts/qemu-smoke.sh default"
 	@echo "  qemu-binary        scripts/qemu-smoke.sh binary"
@@ -28,21 +28,21 @@ help:
 # --- macOS daily loop (preferred) ---
 
 build-macos:
-	$(CARGO) build --release --features cpal
-	@echo "→ target/release/vinyl-bridge-pi  (macOS, cpal/CoreAudio)"
-	@file target/release/vinyl-bridge-pi || true
+	$(CARGO) build --locked -p vinyl-bridge-pi --no-default-features --release --features cpal
+	@echo "→ ../../target/release/vinyl-bridge-pi  (macOS, cpal/CoreAudio)"
+	@file ../../target/release/vinyl-bridge-pi || true
 
 run-macos:
-	$(CARGO) run --features cpal -- --http-bind $(HTTP_BIND)
+	$(CARGO) run --locked -p vinyl-bridge-pi --no-default-features --features cpal -- --http-bind $(HTTP_BIND)
 
 # Debug build is fine for iterate-on-API cycles
 build-macos-debug:
-	$(CARGO) build --features cpal
+	$(CARGO) build --locked -p vinyl-bridge-pi --no-default-features --features cpal
 
 test-macos: build-macos-debug
 	@pkill -x vinyl-bridge-pi 2>/dev/null || true
 	@set -e; \
-	./target/debug/vinyl-bridge-pi --http-bind $(HTTP_BIND) --log warn & \
+	../../target/debug/vinyl-bridge-pi --http-bind $(HTTP_BIND) --log warn & \
 		pid=$$!; \
 		for i in 1 2 3 4 5 6 7 8 9 10; do \
 			curl -fsS "http://$(HTTP_BIND)/api/status" >/dev/null 2>&1 && break; \

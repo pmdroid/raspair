@@ -11,6 +11,6 @@ name = "airplay"
 path = "src/main.rs"
 
 [dependencies]
-airplay-core = { path = "../core" }
+airplay-core = { path = "../../../crates/airplay-core" }
 anyhow = "1"
 log = "0.4"

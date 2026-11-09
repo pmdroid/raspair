@@ -1,6 +1,0 @@
-# Standalone helper workspace (optional: cargo -C apps/airplay-rs build).
-# vinyl-audio-core path-depends on core/ only — keep manifests self-contained
-# (no workspace.dependencies inheritance) so the monorepo root workspace is happy.
-[workspace]
-resolver = "2"
-members = ["core", "cli"]

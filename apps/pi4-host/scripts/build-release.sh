@@ -3,7 +3,7 @@
 # macOS daily loop: use `make build-macos` / `just build-macos` instead.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-APPS="$(cd "$ROOT/.." && pwd)"
+WORKSPACE="$(cd "$ROOT/../.." && pwd)"
 cd "$ROOT"
 mkdir -p dist
 
@@ -11,16 +11,15 @@ log() { printf '==> %s\n' "$*"; }
 
 if [[ "$(uname -s)" == "Linux" && "$(uname -m)" == "aarch64" ]]; then
   log "native aarch64 Linux build (+alsa)"
-  cargo build --release --no-default-features --features alsa
-  cp -f target/release/vinyl-bridge-pi dist/vinyl-bridge-pi
+  cargo build --locked -p vinyl-bridge-pi --release --no-default-features --features alsa
+  cp -f "${CARGO_TARGET_DIR:-$WORKSPACE/target}"/release/vinyl-bridge-pi dist/vinyl-bridge-pi
   strip dist/vinyl-bridge-pi || true
 elif command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
   log "Docker linux/arm64 native build (+alsa) with airplay-core path dep"
   # Stream monorepo slice via tar (avoids flaky bind mounts on external volumes).
-  # Includes airplay-rs/core for path = "../airplay-rs/core".
-  tar -C "$APPS" -cf - \
-      pi4-host/Cargo.toml pi4-host/Cargo.lock pi4-host/src pi4-host/static \
-      airplay-rs/core \
+  tar -C "$WORKSPACE" -cf - \
+      Cargo.toml Cargo.lock apps/pi4-host/Cargo.toml apps/pi4-host/src apps/pi4-host/static \
+      crates/airplay-core apps/airplay-rs/cli \
   | docker run --rm -i --platform linux/arm64 \
       -v vinyl-pi-cargo-registry:/usr/local/cargo/registry \
       -v vinyl-pi-cargo-git:/usr/local/cargo/git \
@@ -34,8 +33,8 @@ elif command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
         DEBIAN_FRONTEND=noninteractive apt-get install -y -qq libasound2-dev pkg-config >/dev/null
         mkdir -p /build
         tar -C /build -xf -
-        cd /build/pi4-host
-        cargo build --release --no-default-features --features alsa
+        cd /build
+        cargo build --locked -p vinyl-bridge-pi --release --no-default-features --features alsa
         strip /target/release/vinyl-bridge-pi || true
         file /target/release/vinyl-bridge-pi
         ls -lh /target/release/vinyl-bridge-pi

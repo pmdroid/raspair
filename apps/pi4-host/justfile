@@ -11,23 +11,23 @@ default:
 
 # Native macOS binary (cpal → CoreAudio). Fast local loop.
 build-macos:
-    cargo build --release --features cpal
-    @file target/release/vinyl-bridge-pi || true
-    @echo "→ target/release/vinyl-bridge-pi"
+    cargo build --locked -p vinyl-bridge-pi --no-default-features --release --features cpal
+    @file ../../target/release/vinyl-bridge-pi || true
+    @echo "→ ../../target/release/vinyl-bridge-pi"
 
 # Run on macOS (non-root port by default)
 run-macos:
-    cargo run --features cpal -- --http-bind {{http_bind}}
+    cargo run --locked -p vinyl-bridge-pi --no-default-features --features cpal -- --http-bind {{http_bind}}
 
 # Debug iterate
 build-macos-debug:
-    cargo build --features cpal
+    cargo build --locked -p vinyl-bridge-pi --no-default-features --features cpal
 
 # Short HTTP smoke on macOS
 test-macos: build-macos-debug
     #!/usr/bin/env bash
     set -euo pipefail
-    ./target/debug/vinyl-bridge-pi --http-bind {{http_bind}} --log warn &
+    ../../target/debug/vinyl-bridge-pi --http-bind {{http_bind}} --log warn &
     pid=$!
     trap 'kill $pid 2>/dev/null || true' EXIT
     sleep 1
