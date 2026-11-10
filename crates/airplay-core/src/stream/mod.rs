@@ -9,7 +9,10 @@ pub mod realtime;
 pub mod rtp;
 pub mod timing_server;
 
-pub use buffered::{buffered_ssrc_for_audio_format, BufferedStream};
+pub use buffered::{
+    buffered_queue, buffered_ssrc_for_audio_format, BufferedCodec, BufferedFeed, BufferedProducer, BufferedProgress, BufferedSink,
+    BufferedStream, BufferedWriter,
+};
 pub use encrypt::generate_shk;
 pub use ntp::ntp_now;
 pub use realtime::{RealtimeProgress, RealtimeSender, RealtimeSink, RealtimeStream};

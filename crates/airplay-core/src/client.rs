@@ -1324,6 +1324,10 @@ pub fn begin_live_realtime_synchronized(clients: &mut [Client]) -> Result<()> {
 /// After this returns, call [`Client::write_buffered_frame`] on each client with
 /// identical payload bytes (or drop dead clients fail-soft).
 pub fn begin_live_buffered_synchronized(clients: &mut [Client]) -> Result<()> {
+    arm_buffered_synchronized(clients).map(|_| ())
+}
+
+pub(crate) fn arm_buffered_synchronized(clients: &mut [Client]) -> Result<Instant> {
     if clients.is_empty() {
         bail!("no clients");
     }
@@ -1348,6 +1352,7 @@ pub fn begin_live_buffered_synchronized(clients: &mut [Client]) -> Result<()> {
     let seq = clients[0].buffered.as_ref().unwrap().seq();
     let rtp_time = clients[0].buffered.as_ref().unwrap().rtp_timestamp();
     let shared_anchor = clients[0].ptp_anchor_for_playback();
+    let anchor_local = Instant::now() + duration_env("AP2_ANCHOR_LEAD_MS", DEFAULT_ANCHOR_LEAD_MS);
     if shared_anchor.is_none() {
         log::warn!("begin_live_buffered_synchronized: no PTP anchor from leader");
     }
@@ -1366,8 +1371,50 @@ pub fn begin_live_buffered_synchronized(clients: &mut [Client]) -> Result<()> {
                     c.device.as_ref().map(|d| d.name.as_str()).unwrap_or("?")
                 )
             })?;
+        c.last_feedback = Instant::now();
     }
-    Ok(())
+    Ok(anchor_local)
+}
+
+impl stream::BufferedSink for Client {
+    fn send_frame(&mut self, payload: &[u8], cancelled: &dyn Fn() -> bool) -> Result<()> {
+        let b = self.buffered.as_mut().ok_or_else(|| anyhow!("buffered stream not set up"))?;
+        b.write_frame_cancellable(payload, cancelled).context("write buffered frame")?;
+        feedback_checked(self)
+    }
+}
+
+pub fn stream_buffered_synchronized(
+    clients: &mut [Client],
+    format: &BufferedAudioFormat,
+    feed: &stream::BufferedFeed,
+    cancelled: &dyn Fn() -> bool,
+    on_progress: &mut dyn FnMut(stream::BufferedProgress),
+) -> Result<stream::BufferedProgress> {
+    stream::BufferedCodec::of(format)?;
+    let anchor_local = arm_buffered_synchronized(clients).inspect_err(|error| feed.fail(error))?;
+    stream_buffered_armed(clients, format, anchor_local, feed, cancelled, on_progress)
+}
+
+pub(crate) fn stream_buffered_armed(
+    clients: &mut [Client],
+    format: &BufferedAudioFormat,
+    anchor_local: Instant,
+    feed: &stream::BufferedFeed,
+    cancelled: &dyn Fn() -> bool,
+    on_progress: &mut dyn FnMut(stream::BufferedProgress),
+) -> Result<stream::BufferedProgress> {
+    let b = clients.first().and_then(|c| c.buffered.as_ref()).ok_or_else(|| anyhow!("buffered stream not set up"))?;
+    let writer = stream::BufferedWriter {
+        codec: stream::BufferedCodec::of(format)?,
+        samples_per_frame: b.samples_per_frame() as usize,
+        interval: b.packet_interval(),
+        anchor_local,
+        send_lead: duration_env("AP2_SEND_LEAD_MS", DEFAULT_ANCHOR_LEAD_MS),
+    };
+    let progress = writer.run(clients, feed, cancelled, on_progress)?;
+    stream::buffered::wait_until(anchor_local + writer.interval * progress.packets as u32, cancelled)?;
+    Ok(progress)
 }
 
 /// Stream pre-encoded buffered frames (AAC, 24-bit PCM, or ALAC) to one or
