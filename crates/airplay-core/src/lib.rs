@@ -29,4 +29,4 @@ pub use timing::{PtpAnchor, PtpClock};
 pub mod session;
 pub use session::{Cancellation, Session, SessionError, SessionEvent, SessionOptions, SessionProfile, StereoPair};
 pub use profile::{FallbackPolicy, FallbackReason, OutputProfile, ProfileSelection, QualityReport, SourceFormat};
-pub use player::{Player, PlayerError, PlayerEvent, PlayerSink, PlayerState, PlayerStatus, Position};
+pub use player::{Command, CommandError, CommandId, CommandState, Control, Player, PlayerError, PlayerEvent, PlayerSink, PlayerState, PlayerStatus, Position, Volume};
