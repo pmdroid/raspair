@@ -1,5 +1,6 @@
 use crate::profile::{self, FallbackPolicy, ProfileSelection, ProfileTarget};
 use crate::audio::convert::OutputFormat;
+use crate::pairing::{CredentialStore, StoreError};
 use crate::protocol::Route;
 use crate::stream::{RealtimeProgress, RealtimeSender};
 use crate::{BufferedAudioFormat, Client, Device};
@@ -77,6 +78,7 @@ pub struct SessionOptions {
     pub pairing_challenge_expiry: Duration,
     pub volume_db: f64,
     pub cancellation: Cancellation,
+    pub credentials: Option<Arc<dyn CredentialStore>>,
 }
 
 impl Default for SessionOptions {
@@ -89,6 +91,7 @@ impl Default for SessionOptions {
             pairing_challenge_expiry: Duration::from_secs(120),
             volume_db: -30.0,
             cancellation: Cancellation::default(),
+            credentials: None,
         }
     }
 }
@@ -133,6 +136,9 @@ impl Session {
         let guard = Deadline::new(socket.clone(), options.connection_timeout, options.cancellation.clone());
         let mut client = Client::new();
         client.set_startup_volume(options.volume_db);
+        if let Some(store) = &options.credentials {
+            client.set_credential_store(store.clone());
+        }
         client.deadline = Some((guard.end, options.cancellation.clone()));
         let result = (|| {
             let stream = loop {
@@ -374,6 +380,9 @@ impl ProfileTarget for ClientTarget<'_> {
 fn translate(error: anyhow::Error) -> SessionError {
     if let Some(typed) = error.downcast_ref::<SessionError>() {
         return typed.clone();
+    }
+    if error.chain().any(|c| c.is::<StoreError>()) {
+        return SessionError::LocalPermissions;
     }
     for cause in error.chain() {
         if let Some(io) = cause.downcast_ref::<std::io::Error>() {

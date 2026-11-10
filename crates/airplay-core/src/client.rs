@@ -4,7 +4,7 @@
 
 use crate::audio::{self, PcmEncoder};
 use crate::discovery::Device;
-use crate::pairing::{identity_exists, PairingSession};
+use crate::pairing::{CredentialStore, FileStore, PairingSession, Stored};
 use crate::protocol::HapPairing;
 use crate::rtsp::{setup, Client as RtspClient};
 use crate::stream::{self, BufferedStream, RealtimeStream, TimingServer};
@@ -150,6 +150,7 @@ pub struct Client {
     events: Option<EventChannel>,
     last_feedback: Instant,
     pub(crate) deadline: Option<(Instant, crate::session::Cancellation)>,
+    credentials: Option<Arc<dyn CredentialStore>>,
 }
 
 impl Default for Client {
@@ -186,7 +187,19 @@ impl Client {
             events: None,
             last_feedback: Instant::now(),
             deadline: None,
+            credentials: None,
         }
+    }
+
+    pub fn set_credential_store(&mut self, store: Arc<dyn CredentialStore>) {
+        self.credentials = Some(store);
+    }
+
+    fn credential_store(&mut self) -> Result<Arc<dyn CredentialStore>> {
+        if self.credentials.is_none() {
+            self.credentials = Some(Arc::new(FileStore::open_default()?));
+        }
+        Ok(self.credentials.clone().unwrap())
     }
 
     fn dial_event(&self, addr: &str, port: u16) -> Result<TcpStream> {
@@ -276,6 +289,10 @@ impl Client {
     /// future connects can pair-verify). HomePods don't need this — they pair
     /// transiently at [`Client::connect`] time.
     pub fn pair(dev: &Device, pin: &str) -> Result<()> {
+        Self::pair_with_store(dev, pin, &FileStore::open_default()?)
+    }
+
+    pub fn pair_with_store(dev: &Device, pin: &str, store: &dyn CredentialStore) -> Result<()> {
         let route = dev.route();
         if route.hap_pairing()? != HapPairing::Persistent {
             return Err(crate::session::SessionError::UnsupportedAuthentication(route.auth).into());
@@ -283,8 +300,10 @@ impl Client {
         let addr = dev.ip().ok_or_else(|| anyhow!("no IP address for device"))?;
         let mut rtsp = RtspClient::connect(&addr, dev.port).context("RTSP connect")?;
         let mut session = PairingSession::new(&dev.record.device_id, pin);
-        session.load_or_create_identity()?;
+        session.load_or_create_identity(store)?;
         session.pair_apple_tv(&mut rtsp).context("pair-setup")?;
+        let record = session.pairing_record().ok_or_else(|| anyhow!("pair-setup returned no accessory identity"))?;
+        store.save(&record).context("save pairing")?;
         Ok(())
     }
 
@@ -308,13 +327,13 @@ impl Client {
             session.pair_homepod(&mut rtsp).context("pair HomePod")?;
             self.shared_secret = session.shared_secret.clone();
         } else {
-            if !identity_exists(&dev.record.device_id) {
-                bail!(
-                    "not paired with {} yet — run the pair step first",
-                    dev.name
-                );
+            match self.credential_store()?.load(&dev.record.device_id)? {
+                Stored::Paired(record) => session.use_record(&record),
+                Stored::Missing => bail!("not paired with {} yet — run the pair step first", dev.name),
+                Stored::RePairRequired { .. } => {
+                    bail!("not paired with {}: legacy key lacks receiver trust, run the pair step again", dev.name)
+                }
             }
-            session.load_or_create_identity()?;
             session.pair_verify(&mut rtsp).context("pair-verify")?;
             self.shared_secret = session.shared_secret.clone();
         }

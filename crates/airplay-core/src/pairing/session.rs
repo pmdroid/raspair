@@ -8,6 +8,7 @@ use super::crypto::{
     nonce_from_string, shared_secret,
 };
 use super::identity::{self, Identity};
+use super::store::{AuthMethod, CredentialStore, PairingRecord, Stored};
 use super::srp::{padded_bytes, SrpClient};
 use super::tlv::{self, TlvItem};
 use anyhow::{anyhow, bail, Context, Result};
@@ -51,6 +52,7 @@ pub struct PairingSession {
     pub identity: Option<Identity>,
     pub session_key: Vec<u8>,
     pub server_ltpk: Vec<u8>,
+    pub accessory_id: String,
     pub shared_secret: Vec<u8>,
     srp: Option<SrpClient>,
 }
@@ -64,6 +66,7 @@ impl PairingSession {
             identity: None,
             session_key: Vec::new(),
             server_ltpk: Vec::new(),
+            accessory_id: String::new(),
             shared_secret: Vec::new(),
             srp: None,
         }
@@ -82,13 +85,33 @@ impl PairingSession {
         t.post(path, &headers, body)
     }
 
-    pub fn load_or_create_identity(&mut self) -> Result<()> {
-        if identity::identity_exists(&self.device_id) {
-            self.identity = Some(identity::load(&self.device_id)?);
-        } else {
-            self.identity = Some(Identity::generate());
-        }
+    pub fn load_or_create_identity(&mut self, store: &dyn CredentialStore) -> Result<()> {
+        self.identity = Some(match store.load(&self.device_id)? {
+            Stored::Paired(record) => record.controller_key,
+            Stored::Missing | Stored::RePairRequired { .. } => Identity::generate(),
+        });
         Ok(())
+    }
+
+    pub fn use_record(&mut self, record: &PairingRecord) {
+        self.identity = Some(record.controller_key.clone());
+        self.server_ltpk = record.accessory_public_key.to_vec();
+        self.accessory_id = record.accessory_id.clone();
+    }
+
+    pub fn pairing_record(&self) -> Option<PairingRecord> {
+        if self.is_transient || self.accessory_id.is_empty() {
+            return None;
+        }
+        Some(PairingRecord {
+            method: AuthMethod::PairSetupPin,
+            receiver_id: self.device_id.clone(),
+            controller_id: String::from_utf8(self.controller_pairing_id()).ok()?,
+            accessory_id: self.accessory_id.clone(),
+            controller_key: self.identity.clone()?,
+            accessory_public_key: self.server_ltpk.as_slice().try_into().ok()?,
+            password: None,
+        })
     }
 
     // A stable UUID-format identifier derived from our LTPK. pair-setup M5 and
@@ -238,8 +261,8 @@ impl PairingSession {
         }
 
         self.server_ltpk = device_pub.to_vec();
+        self.accessory_id = String::from_utf8(device_id.to_vec()).context("M6 accessory id")?;
         self.session_key = srp_session_key;
-        identity::save(&self.device_id, self.identity.as_ref().unwrap()).context("save identity")?;
         Ok(())
     }
 

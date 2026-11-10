@@ -1,5 +1,6 @@
 use super::crypto::{chacha20poly1305_decrypt, chacha20poly1305_encrypt, hkdf_expand, nonce_from_string};
 use super::identity::{self, Identity};
+use super::store::{CredentialStore, MemoryStore, Stored};
 use super::session::{PairTransport, PairingSession, HOMEPOD_PIN};
 use super::srp::{compute_k, generator, h, modulus, padded_bytes, GROUP_BYTES};
 use super::tlv::{self, TlvItem};
@@ -236,7 +237,7 @@ fn homepod_transient_transcript_proves_pair_success_only() {
     assert_eq!(session.shared_secret.len(), 64);
     assert!(session.server_ltpk.is_empty());
     assert!(receiver.controller_ltpk.is_empty());
-    assert!(!identity::identity_exists("fixture-transient-receiver"));
+    assert!(session.pairing_record().is_none());
     assert!(!receiver.saw_playback());
 }
 
@@ -251,8 +252,6 @@ fn transient_pairing_rejects_wrong_receiver_pin() {
 
 #[test]
 fn persistent_pin_transcript_separates_pair_success_and_verified_reconnect() {
-    let dir = std::env::temp_dir().join(format!("airplay-core-fixture-{}", std::process::id()));
-    std::env::set_var("AIRPLAY_CONFIG_DIR", &dir);
     let mut receiver = SyntheticReceiver::new(SYNTHETIC_PIN);
     let mut session = PairingSession::new(SYNTHETIC_RECEIVER_ID, &receiver.pin.clone());
     let proven = session.pair_apple_tv(&mut receiver).map(|_| Proven::PairSuccess).unwrap();
@@ -273,9 +272,12 @@ fn persistent_pin_transcript_separates_pair_success_and_verified_reconnect() {
     assert_eq!(session.server_ltpk, receiver.accessory_ltpk());
     let controller = session.identity.clone().unwrap();
     assert_eq!(receiver.controller_ltpk, controller.public_key().to_vec());
-    let saved = identity::load(SYNTHETIC_RECEIVER_ID).unwrap();
+    let store = MemoryStore::default();
+    store.save(&session.pairing_record().unwrap()).unwrap();
+    let Stored::Paired(record) = store.load(SYNTHETIC_RECEIVER_ID).unwrap() else { panic!("record not saved") };
+    assert_eq!(record.accessory_public_key.to_vec(), receiver.accessory_ltpk());
+    let saved = record.controller_key;
     assert_eq!(saved.public_key(), controller.public_key());
-    std::fs::remove_dir_all(&dir).unwrap();
 
     receiver.transcript.clear();
     let proven = reconnect(&mut receiver, saved, session.server_ltpk.clone()).unwrap();
