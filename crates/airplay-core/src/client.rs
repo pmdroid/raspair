@@ -122,6 +122,10 @@ fn duration_env(name: &str, default_ms: u64) -> Duration {
     Duration::from_millis(default_ms)
 }
 
+pub(crate) fn buffered_send_lead() -> Duration {
+    duration_env("AP2_SEND_LEAD_MS", DEFAULT_ANCHOR_LEAD_MS)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Access {
     Rtsp { password: bool },
@@ -1577,7 +1581,7 @@ pub(crate) fn stream_buffered_armed(
         samples_per_frame: b.samples_per_frame() as usize,
         interval: b.packet_interval(),
         anchor_local,
-        send_lead: duration_env("AP2_SEND_LEAD_MS", DEFAULT_ANCHOR_LEAD_MS),
+        send_lead: buffered_send_lead(),
     };
     let progress = writer.run(clients, feed, cancelled, on_progress)?;
     stream::buffered::wait_until(anchor_local + writer.interval * progress.packets as u32, cancelled)?;
