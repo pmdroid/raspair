@@ -26,5 +26,5 @@ pub use discovery::Device;
 pub use timing::{PtpAnchor, PtpClock};
 
 pub mod session;
-pub use session::{Cancellation, Session, SessionError, SessionEvent, SessionOptions, SessionProfile};
+pub use session::{Cancellation, Session, SessionError, SessionEvent, SessionOptions, SessionProfile, StereoPair};
 pub use profile::{FallbackPolicy, FallbackReason, OutputProfile, ProfileSelection, QualityReport, SourceFormat};

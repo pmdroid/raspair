@@ -177,6 +177,7 @@ pub struct Client {
     pub(crate) deadline: Option<(Instant, crate::session::Cancellation)>,
     credentials: Option<Arc<dyn CredentialStore>>,
     password: Option<String>,
+    pub(crate) member: Option<String>,
 }
 
 impl Default for Client {
@@ -215,6 +216,7 @@ impl Client {
             deadline: None,
             credentials: None,
             password: None,
+            member: None,
         }
     }
 
@@ -700,13 +702,8 @@ impl Client {
         }
 
         // PTP is needed for any buffered stream, not just group mode.
-        if stream_type == StreamType::Buffered && self.ptp.is_none() {
-            if let Some(v4) = dev.ipv4 {
-                match PtpClock::start(v4) {
-                    Ok(ptp) => self.ptp = Some(Arc::new(ptp)),
-                    Err(e) => log::warn!("PTP failed to start (buffered anchor likely rejected): {e}"),
-                }
-            }
+        if stream_type == StreamType::Buffered {
+            self.start_ptp(&dev)?;
         }
 
         // Decide early which audio key the group-unicast fallback will use so
@@ -800,14 +797,7 @@ impl Client {
         }
 
         if stream_type == StreamType::Buffered {
-            if self.ptp.is_none() {
-                if let Some(v4) = dev.ipv4 {
-                    match PtpClock::start(v4) {
-                        Ok(ptp) => self.ptp = Some(Arc::new(ptp)),
-                        Err(e) => log::warn!("PTP failed to start (buffered anchor likely rejected): {e}"),
-                    }
-                }
-            }
+            self.start_ptp(&dev)?;
         }
 
         // Audio encryption key: HKDF-derived from the pair-verify shared secret
@@ -957,6 +947,29 @@ impl Client {
         }
 
         Ok(())
+    }
+
+    fn start_ptp(&mut self, dev: &Device) -> Result<()> {
+        if let (None, Some(v4)) = (self.ptp.as_ref(), dev.ipv4) {
+            match PtpClock::start(v4) {
+                Ok(ptp) => self.ptp = Some(Arc::new(ptp)),
+                Err(e) if e.downcast_ref::<crate::session::SessionError>().is_some() => return Err(e),
+                Err(e) => log::warn!("PTP failed to start (buffered anchor likely rejected): {e}"),
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn tagged<T>(&mut self, op: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
+        let result = op(self);
+        self.tag(result)
+    }
+
+    pub(crate) fn tag<T>(&self, result: Result<T>) -> Result<T> {
+        match &self.member {
+            Some(id) => result.map_err(|e| e.context(MemberFault(id.clone()))),
+            None => result,
+        }
     }
 
     /// RECORD / FLUSHBUFFERED / SETRATEANCHORTIME to arm buffered playback at
@@ -1248,6 +1261,14 @@ impl Client {
         self.streamer = Some(stream);
     }
 
+    #[cfg(test)]
+    pub(crate) fn attach_buffered(&mut self, rtsp: RtspClient, buffered: BufferedStream, ptp: Arc<PtpClock>) {
+        self.rtsp = Some(rtsp);
+        self.rtsp_path = "rtsp://127.0.0.1/1".into();
+        self.buffered = Some(buffered);
+        self.ptp = Some(ptp);
+    }
+
     /// Send an NTP sync packet (call ~1/s from the live sender).
     pub fn send_realtime_sync(&mut self, first: bool) -> Result<()> {
         let s = self
@@ -1284,6 +1305,29 @@ impl Client {
 }
 
 // ---- synchronized (stereo-pair) playback -----------------------------------
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("stereo member {0}")]
+pub(crate) struct MemberFault(pub String);
+
+pub(crate) struct Members<'a>(pub &'a mut [Client]);
+
+impl stream::RealtimeSink for Members<'_> {
+    fn send_frame(&mut self, payload: &[u8], marker: bool) -> Result<()> {
+        self.0.iter_mut().try_for_each(|c| c.tagged(|c| stream::RealtimeSink::send_frame(c, payload, marker)))
+    }
+    fn send_sync(&mut self) -> Result<()> {
+        self.0.iter_mut().try_for_each(|c| c.tagged(|c| c.send_realtime_sync(false)))
+    }
+    fn service(&mut self) -> Result<(u64, u64)> {
+        let mut total = (0, 0);
+        for c in self.0.iter_mut() {
+            let (requested, resent) = c.tagged(stream::RealtimeSink::service)?;
+            total = (total.0 + requested, total.1 + resent);
+        }
+        Ok(total)
+    }
+}
 
 fn feedback_if_due(c: &mut Client) {
     let _ = feedback_checked(c);
@@ -1408,11 +1452,8 @@ pub fn begin_live_realtime_synchronized(clients: &mut [Client]) -> Result<()> {
         let rtp_info = format!("seq={};rtptime={}", s.seq(), s.rtp_timestamp());
         let path = c.rtsp_path.clone();
         let _ = c.rtsp_mut().do_request(setup::new_flush(&path, &rtp_info));
-        c.streamer
-            .as_mut()
-            .unwrap()
-            .send_sync(true)
-            .context("first sync")?;
+        let synced = c.streamer.as_mut().unwrap().send_sync(true).context("first sync");
+        c.tag(synced)?;
         c.last_feedback = Instant::now();
     }
     Ok(())
@@ -1463,13 +1504,13 @@ pub(crate) fn arm_buffered_synchronized(clients: &mut [Client]) -> Result<Instan
             let b = c.buffered.as_ref().unwrap();
             (b.seq(), b.rtp_timestamp())
         };
-        c.start_buffered_playback(cs, cr, shared_anchor)
-            .with_context(|| {
-                format!(
-                    "start buffered playback {}",
-                    c.device.as_ref().map(|d| d.name.as_str()).unwrap_or("?")
-                )
-            })?;
+        let armed = c.start_buffered_playback(cs, cr, shared_anchor).with_context(|| {
+            format!(
+                "start buffered playback {}",
+                c.device.as_ref().map(|d| d.name.as_str()).unwrap_or("?")
+            )
+        });
+        c.tag(armed)?;
         c.last_feedback = Instant::now();
     }
     Ok(anchor_local)
@@ -1478,8 +1519,9 @@ pub(crate) fn arm_buffered_synchronized(clients: &mut [Client]) -> Result<Instan
 impl stream::BufferedSink for Client {
     fn send_frame(&mut self, payload: &[u8], cancelled: &dyn Fn() -> bool) -> Result<()> {
         let b = self.buffered.as_mut().ok_or_else(|| anyhow!("buffered stream not set up"))?;
-        b.write_frame_cancellable(payload, cancelled).context("write buffered frame")?;
-        feedback_checked(self)
+        let sent = b.write_frame_cancellable(payload, cancelled).context("write buffered frame");
+        let sent = sent.and_then(|()| feedback_checked(self));
+        self.tag(sent)
     }
 }
 
