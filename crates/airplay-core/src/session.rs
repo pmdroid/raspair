@@ -1,5 +1,7 @@
 use crate::profile::{self, FallbackPolicy, ProfileSelection, ProfileTarget};
-use crate::protocol::StreamCandidate;
+use crate::audio::convert::OutputFormat;
+use crate::protocol::Route;
+use crate::stream::{RealtimeProgress, RealtimeSender};
 use crate::{BufferedAudioFormat, Client, Device};
 use std::net::{Shutdown, SocketAddr, TcpStream};
 use std::sync::{
@@ -30,6 +32,10 @@ pub enum SessionError {
     UnsupportedAuthentication(crate::protocol::AuthRequirement),
     #[error("receiver rejected request with status {status}")]
     ReceiverRejected { status: u16 },
+    #[error("realtime playback is 16-bit only but {requested}-bit was requested; use a buffered profile for 24-bit or request 16-bit realtime")]
+    RealtimeBitDepth { requested: u16 },
+    #[error("receiver has no validated {requested} Hz realtime profile; request a rate from Route::realtime_rates or allow a fallback")]
+    RealtimeRate { requested: u32 },
 }
 
 #[derive(Clone, Default)]
@@ -48,6 +54,18 @@ impl Cancellation {
 pub enum SessionProfile {
     Realtime { sample_rate: i32 },
     Buffered(BufferedAudioFormat),
+}
+
+impl SessionProfile {
+    pub fn realtime(sample_rate: u32, bits: u16) -> Result<Self, SessionError> {
+        if bits != 16 {
+            return Err(SessionError::RealtimeBitDepth { requested: bits });
+        }
+        if !crate::audio::convert::OUTPUT_RATES.contains(&sample_rate) {
+            return Err(SessionError::RealtimeRate { requested: sample_rate });
+        }
+        Ok(Self::Realtime { sample_rate: sample_rate as i32 })
+    }
 }
 
 #[derive(Clone)]
@@ -89,6 +107,8 @@ pub struct Session {
     socket: Arc<Mutex<Option<TcpStream>>>,
     events: Vec<SessionEvent>,
     selection: Option<ProfileSelection>,
+    realtime: Option<RealtimeSender>,
+    armed: bool,
 }
 
 impl Session {
@@ -105,7 +125,7 @@ impl Session {
         profile::candidates(&options.profile, &options.fallback)?;
         let route = device.route();
         route.hap_pairing()?;
-        profile::preflight(&route.streams, &options.profile, &options.fallback)?;
+        profile::preflight(&route, &options.profile, &options.fallback)?;
         let mut options = options;
         let ip = device.ip().ok_or(SessionError::InvalidInput)?;
         let addr = SocketAddr::new(ip.parse().map_err(|_| SessionError::InvalidInput)?, device.port);
@@ -129,7 +149,7 @@ impl Session {
             guard.check()?;
             let rtsp = crate::rtsp::Client::from_stream(&ip, device.port, stream).map_err(translate)?;
             client.connect_transport(device, pin, rtsp).map_err(translate)?;
-            let mut target = ClientTarget { client: &mut client, streams: &route.streams };
+            let mut target = ClientTarget { client: &mut client, route: &route };
             let negotiated = profile::negotiate(&mut target, &options.profile, &options.fallback)?;
             guard.check()?;
             Ok(negotiated)
@@ -147,9 +167,69 @@ impl Session {
             }
         };
         client.deadline = None;
+        let realtime = match effective {
+            SessionProfile::Realtime { sample_rate } => {
+                if let Some(s) = socket.lock().unwrap().as_ref() {
+                    s.set_read_timeout(Some(options.shutdown_timeout)).map_err(|e| translate(e.into()))?;
+                    s.set_write_timeout(Some(options.shutdown_timeout)).map_err(|e| translate(e.into()))?;
+                }
+                Some(RealtimeSender::new(sample_rate as u32, client.realtime_latency().unwrap_or_default()))
+            }
+            SessionProfile::Buffered(_) => None,
+        };
         options.profile = effective;
         let events = vec![SessionEvent::Connected, SessionEvent::Profile(selection)];
-        Ok(Self { client: Some(client), options, socket, events, selection: Some(selection) })
+        Ok(Self { client: Some(client), options, socket, events, selection: Some(selection), realtime, armed: false })
+    }
+
+    pub fn realtime_output(&self) -> Option<OutputFormat> {
+        match self.options.profile {
+            SessionProfile::Realtime { sample_rate } => Some(OutputFormat { sample_rate: sample_rate as u32, bits: 16 }),
+            SessionProfile::Buffered(_) => None,
+        }
+    }
+
+    pub fn realtime_progress(&self) -> Option<RealtimeProgress> {
+        self.realtime.as_ref().map(RealtimeSender::progress)
+    }
+
+    pub fn write_realtime_samples(&mut self, samples: &[f32]) -> Result<RealtimeProgress, SessionError> {
+        self.drive_realtime(Some(samples))
+    }
+
+    pub fn finish_realtime(&mut self) -> Result<RealtimeProgress, SessionError> {
+        self.drive_realtime(None)
+    }
+
+    fn drive_realtime(&mut self, samples: Option<&[f32]>) -> Result<RealtimeProgress, SessionError> {
+        let cancellation = self.options.cancellation.clone();
+        if cancellation.is_cancelled() {
+            self.stop()?;
+            return Err(SessionError::Cancelled);
+        }
+        let sender = self.realtime.as_mut().ok_or(SessionError::UnsupportedProfile)?;
+        let client = self.client.as_mut().ok_or(SessionError::ConnectionLost)?;
+        let cancelled = || cancellation.is_cancelled();
+        let mut result = Ok(());
+        if !self.armed {
+            result = crate::client::begin_live_realtime_synchronized(std::slice::from_mut(client));
+            self.armed = result.is_ok();
+        }
+        let result = result
+            .and_then(|()| match samples {
+                Some(samples) => sender.push(client, samples, &cancelled),
+                None => sender.finish(client, &cancelled),
+            })
+            .map_err(translate);
+        if let Err(ref error) = result {
+            if *error != SessionError::InvalidInput {
+                if *error != SessionError::Cancelled {
+                    self.events.push(SessionEvent::Failed(error.clone()));
+                }
+                let _ = self.stop();
+            }
+        }
+        result
     }
 
     pub fn profile(&self) -> Option<ProfileSelection> {
@@ -182,7 +262,11 @@ impl Session {
 
     pub fn begin_playback(&mut self) -> Result<(), SessionError> {
         let client = self.client.as_mut().ok_or(SessionError::ConnectionLost)?;
-        if client.has_buffered() {
+        if self.realtime.is_some() && !self.armed {
+            crate::client::begin_live_realtime_synchronized(std::slice::from_mut(client)).map_err(translate)?;
+            self.armed = true;
+            Ok(())
+        } else if client.has_buffered() {
             client.begin_buffered_playback().map_err(translate)
         } else {
             Ok(())
@@ -271,12 +355,12 @@ impl Drop for Deadline {
 
 struct ClientTarget<'a> {
     client: &'a mut Client,
-    streams: &'a [StreamCandidate],
+    route: &'a Route,
 }
 
 impl ProfileTarget for ClientTarget<'_> {
-    fn streams(&self) -> &[StreamCandidate] {
-        self.streams
+    fn route(&self) -> &Route {
+        self.route
     }
     fn setup(&mut self, profile: &SessionProfile) -> Result<(), SessionError> {
         match profile {
@@ -323,12 +407,68 @@ mod tests {
             socket: Arc::new(Mutex::new(Some(stream))),
             events: Vec::new(),
             selection: None,
+            realtime: None,
+            armed: false,
         };
+        assert_eq!(session.write_realtime_samples(&[0.0; 2]), Err(SessionError::UnsupportedProfile));
         let start = Instant::now();
         session.cancel().unwrap();
         session.stop().unwrap();
         assert!(start.elapsed() < session.options.shutdown_timeout);
         assert_eq!(session.events().collect::<Vec<_>>(), vec![SessionEvent::Stopped]);
         assert_eq!(std::io::Read::read(&mut receiver, &mut [0]).unwrap(), 0);
+    }
+
+    fn realtime_session() -> (Session, std::net::UdpSocket) {
+        let data = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let mut stream = crate::stream::RealtimeStream::new(&[1; 32], "127.0.0.1", 48000, 352, 9).unwrap();
+        stream.start(data.local_addr().unwrap().port() as i64, 0).unwrap();
+        let latency = stream.latency();
+        let mut client = Client::new();
+        client.attach_realtime(stream);
+        let options = SessionOptions { profile: SessionProfile::Realtime { sample_rate: 48000 }, ..Default::default() };
+        let session = Session {
+            client: Some(client),
+            options,
+            socket: Arc::new(Mutex::new(None)),
+            events: Vec::new(),
+            selection: None,
+            realtime: Some(RealtimeSender::new(48000, latency)),
+            armed: true,
+        };
+        (session, data)
+    }
+
+    #[test]
+    fn realtime_samples_report_progress_and_cancel_within_deadline() {
+        let (mut session, _data) = realtime_session();
+        assert_eq!(session.realtime_output(), Some(OutputFormat { sample_rate: 48000, bits: 16 }));
+        let progress = session.write_realtime_samples(&[0.25; 352 * 2 + 10]).unwrap();
+        assert_eq!((progress.packets, progress.frames), (1, 352));
+        assert_eq!(session.finish_realtime().unwrap().packets, 2);
+        assert_eq!(session.write_realtime_samples(&[0.0; 3]), Err(SessionError::InvalidInput));
+        let token = session.options.cancellation.clone();
+        let canceller = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(30));
+            token.cancel();
+        });
+        let start = Instant::now();
+        assert_eq!(session.write_realtime_samples(&vec![0.0; 48000 * 20]), Err(SessionError::Cancelled));
+        assert!(start.elapsed() < Duration::from_millis(300));
+        canceller.join().unwrap();
+        assert_eq!(session.events().collect::<Vec<_>>(), vec![SessionEvent::Stopped]);
+        assert_eq!(session.write_realtime_samples(&[0.0; 2]), Err(SessionError::Cancelled));
+    }
+
+    #[test]
+    fn realtime_receiver_disappearance_fails_and_stops_the_session() {
+        let (mut session, data) = realtime_session();
+        drop(data);
+        let start = Instant::now();
+        assert_eq!(session.write_realtime_samples(&vec![0.0; 48000 * 20]), Err(SessionError::ConnectionLost));
+        assert!(start.elapsed() < Duration::from_millis(500));
+        let events: Vec<_> = session.events().collect();
+        assert_eq!(events, vec![SessionEvent::Failed(SessionError::ConnectionLost), SessionEvent::Stopped]);
+        assert_eq!(session.write_realtime_samples(&[0.0; 2]), Err(SessionError::ConnectionLost));
     }
 }

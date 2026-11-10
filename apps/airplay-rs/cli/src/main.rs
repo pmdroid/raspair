@@ -209,7 +209,7 @@ fn run_play(input: &[String]) -> Result<()> {
         SessionProfile::Realtime { sample_rate: 44100 }
     };
     if buffered {
-        preflight(&dev.route().streams, &requested, &FallbackPolicy::Forbid).map_err(|e| {
+        preflight(&dev.route(), &requested, &FallbackPolicy::Forbid).map_err(|e| {
             anyhow!("{}: {e}; buffered {} is strict, use --mode realtime to opt into realtime", dev.name, format.name)
         })?;
         report_quality(file.as_deref(), &requested)?;

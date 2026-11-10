@@ -1119,6 +1119,15 @@ impl Client {
         Ok(())
     }
 
+    pub fn realtime_latency(&self) -> Option<Duration> {
+        self.streamer.as_ref().map(|s| s.latency())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn attach_realtime(&mut self, stream: RealtimeStream) {
+        self.streamer = Some(stream);
+    }
+
     /// Send an NTP sync packet (call ~1/s from the live sender).
     pub fn send_realtime_sync(&mut self, first: bool) -> Result<()> {
         let s = self
@@ -1157,9 +1166,34 @@ impl Client {
 // ---- synchronized (stereo-pair) playback -----------------------------------
 
 fn feedback_if_due(c: &mut Client) {
+    let _ = feedback_checked(c);
+}
+
+fn feedback_checked(c: &mut Client) -> Result<()> {
     if c.last_feedback.elapsed() >= Duration::from_secs(2) {
         c.last_feedback = Instant::now();
-        let _ = c.rtsp_mut().do_request(setup::new_feedback());
+        let rtsp = c.rtsp.as_mut().ok_or(crate::session::SessionError::ConnectionLost)?;
+        let resp = rtsp.do_request(setup::new_feedback()).context("feedback")?;
+        if resp.status_code != 200 {
+            return Err(crate::session::SessionError::ReceiverRejected { status: resp.status_code }.into());
+        }
+    }
+    Ok(())
+}
+
+impl stream::RealtimeSink for Client {
+    fn send_frame(&mut self, payload: &[u8], marker: bool) -> Result<()> {
+        let s = self.streamer.as_mut().ok_or(crate::session::SessionError::ConnectionLost)?;
+        s.write_frame(payload, marker).context("write realtime frame")
+    }
+    fn send_sync(&mut self) -> Result<()> {
+        self.send_realtime_sync(false)
+    }
+    fn service(&mut self) -> Result<(u64, u64)> {
+        let s = self.streamer.as_mut().ok_or(crate::session::SessionError::ConnectionLost)?;
+        let stats = s.service_control()?;
+        feedback_checked(self)?;
+        Ok(stats)
     }
 }
 

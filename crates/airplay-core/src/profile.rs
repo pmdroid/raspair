@@ -1,6 +1,6 @@
 use crate::audio::AudioInfo;
 use crate::client::{AudioCodec, BufferedAudioFormat, StreamType};
-use crate::protocol::StreamCandidate;
+use crate::protocol::{Route, StreamCandidate};
 use crate::session::{SessionError, SessionProfile};
 use std::fmt;
 
@@ -104,12 +104,14 @@ pub enum FallbackReason {
     CapabilitiesUnknown,
     NotAdvertised,
     SetupRejected { status: u16 },
+    RateNotValidated { sample_rate: u32 },
 }
 
 impl FallbackReason {
     fn into_error(self) -> SessionError {
         match self {
             FallbackReason::SetupRejected { status } => SessionError::ReceiverRejected { status },
+            FallbackReason::RateNotValidated { sample_rate } => SessionError::RealtimeRate { requested: sample_rate },
             _ => SessionError::UnsupportedProfile,
         }
     }
@@ -123,21 +125,27 @@ pub struct ProfileSelection {
 }
 
 pub trait ProfileTarget {
-    fn streams(&self) -> &[StreamCandidate];
+    fn route(&self) -> &Route;
     fn setup(&mut self, profile: &SessionProfile) -> Result<(), SessionError>;
 }
 
-pub fn advertised(streams: &[StreamCandidate], profile: &SessionProfile) -> Result<(), FallbackReason> {
+pub fn advertised(route: &Route, profile: &SessionProfile) -> Result<(), FallbackReason> {
     let wanted = match profile {
         SessionProfile::Realtime { .. } => StreamCandidate::Realtime,
         SessionProfile::Buffered(_) => StreamCandidate::Buffered,
     };
-    if streams.is_empty() {
+    if route.streams.is_empty() {
         Err(FallbackReason::CapabilitiesUnknown)
-    } else if streams.contains(&wanted) {
-        Ok(())
-    } else {
+    } else if !route.streams.contains(&wanted) {
         Err(FallbackReason::NotAdvertised)
+    } else if let SessionProfile::Realtime { sample_rate } = profile {
+        let sample_rate = *sample_rate as u32;
+        match route.realtime_rates.contains(&sample_rate) {
+            true => Ok(()),
+            false => Err(FallbackReason::RateNotValidated { sample_rate }),
+        }
+    } else {
+        Ok(())
     }
 }
 
@@ -152,11 +160,11 @@ pub fn candidates<'a>(requested: &'a SessionProfile, policy: &'a FallbackPolicy)
     Ok(all)
 }
 
-pub fn preflight(streams: &[StreamCandidate], requested: &SessionProfile, policy: &FallbackPolicy) -> Result<(), SessionError> {
+pub fn preflight(route: &Route, requested: &SessionProfile, policy: &FallbackPolicy) -> Result<(), SessionError> {
     let all = candidates(requested, policy)?;
-    match all.iter().map(|p| advertised(streams, p)).find(|r| r.is_ok()) {
+    match all.iter().map(|p| advertised(route, p)).find(|r| r.is_ok()) {
         Some(_) => Ok(()),
-        None => Err(advertised(streams, requested).unwrap_err().into_error()),
+        None => Err(advertised(route, requested).unwrap_err().into_error()),
     }
 }
 
@@ -168,7 +176,7 @@ pub fn negotiate(
     let requested_output = OutputProfile::of(requested)?;
     let mut first_reason = None;
     for profile in candidates(requested, policy)? {
-        let reason = match advertised(target.streams(), profile) {
+        let reason = match advertised(target.route(), profile) {
             Err(reason) => reason,
             Ok(()) => match target.setup(profile) {
                 Ok(()) => {
