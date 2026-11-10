@@ -168,7 +168,9 @@ impl Client {
         buf.push_str(&format!("POST {path} HTTP/1.1\r\n"));
         buf.push_str(&format!("Host: {}:{}\r\n", self.addr, self.port));
         buf.push_str(&format!("Content-Length: {}\r\n", body.len()));
-        buf.push_str(&format!("Content-Type: {CONTENT_TYPE_OCTET_STREAM}\r\n"));
+        if !headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("Content-Type")) {
+            buf.push_str(&format!("Content-Type: {CONTENT_TYPE_OCTET_STREAM}\r\n"));
+        }
         buf.push_str(&format!("CSeq: {}\r\n", self.cseq));
         buf.push_str(&format!("User-Agent: {USER_AGENT_PAIRING}\r\n"));
         buf.push_str("Connection: keep-alive\r\n");

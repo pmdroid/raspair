@@ -78,7 +78,6 @@ fn unsupported_auth_is_rejected_before_any_exchange() {
         txt(APPLE_TV, &["flags=0x2c4"]),
         without(APPLE_TV, "flags"),
         txt(&["am=AirPort4,107", "sf=0x4"], &[]),
-        txt(&["am=AirPort4,107", "sf=0xc"], &[]),
         txt(&["features=0x200,0x80000", "flags=0x4"], &[]),
         txt(&["features=0x0,0x100", "flags=0x4"], &[]),
     ];
@@ -97,6 +96,12 @@ fn unsupported_auth_is_rejected_before_any_exchange() {
         let err = Client::pair(&dev, "3939").unwrap_err();
         assert_eq!(err.downcast_ref::<SessionError>(), Some(&expected));
     }
+    let legacy = device(&["am=AirPort4,107", "sf=0xc"]);
+    assert_eq!(legacy.route().pairing_method(), Ok(airplay_core::protocol::PairingMethod::LegacyPin));
+    assert_eq!(
+        Session::connect(&legacy, "3939", SessionOptions::default()).err(),
+        Some(SessionError::UnsupportedAuthentication(A::LegacyPin))
+    );
     let err = Client::pair(&device(HOMEPOD), "3939").unwrap_err();
     assert_eq!(err.downcast_ref::<SessionError>(), Some(&SessionError::UnsupportedAuthentication(A::HapTransient)));
     let pairings = PinPairings::new(std::sync::Arc::new(MemoryStore::default()));

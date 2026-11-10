@@ -1,7 +1,11 @@
 //! Crypto primitives shared by the pairing handshakes: HKDF-SHA512,
 //! Curve25519 ECDH, and ChaCha20-Poly1305 AEAD.
 
+use aes::Aes128;
+use aes_gcm::aead::consts::U16;
+use aes_gcm::{AeadInPlace, AesGcm};
 use anyhow::{anyhow, Result};
+use ctr::cipher::{KeyIvInit, StreamCipher, StreamCipherSeek};
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
 use hkdf::Hkdf;
@@ -52,4 +56,34 @@ pub fn chacha20poly1305_decrypt(key: &[u8], nonce: &[u8], ciphertext: &[u8], aad
     cipher
         .decrypt(Nonce::from_slice(nonce), Payload { msg: ciphertext, aad })
         .map_err(|e| anyhow!("chacha20poly1305 decrypt: {e}"))
+}
+
+type Aes128Gcm16 = AesGcm<Aes128, U16>;
+
+pub fn aes128_gcm_encrypt(key: &[u8], iv: &[u8], plaintext: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
+    let cipher = Aes128Gcm16::new_from_slice(key).map_err(|_| anyhow!("aes-gcm key must be 16 bytes"))?;
+    let mut data = plaintext.to_vec();
+    let tag = cipher
+        .encrypt_in_place_detached(aes_gcm::Nonce::<U16>::from_slice(iv), &[], &mut data)
+        .map_err(|e| anyhow!("aes-gcm encrypt: {e}"))?;
+    Ok((data, tag.to_vec()))
+}
+
+pub fn aes128_gcm_decrypt(key: &[u8], iv: &[u8], ciphertext: &[u8], tag: &[u8]) -> Result<Vec<u8>> {
+    let cipher = Aes128Gcm16::new_from_slice(key).map_err(|_| anyhow!("aes-gcm key must be 16 bytes"))?;
+    if tag.len() != 16 {
+        return Err(anyhow!("aes-gcm tag must be 16 bytes"));
+    }
+    let mut data = ciphertext.to_vec();
+    cipher
+        .decrypt_in_place_detached(aes_gcm::Nonce::<U16>::from_slice(iv), &[], &mut data, aes_gcm::Tag::from_slice(tag))
+        .map_err(|e| anyhow!("aes-gcm decrypt: {e}"))?;
+    Ok(data)
+}
+
+pub fn aes128_ctr_apply(key: &[u8], iv: &[u8], offset: u64, data: &mut [u8]) -> Result<()> {
+    let mut cipher = ctr::Ctr128BE::<Aes128>::new_from_slices(key, iv).map_err(|_| anyhow!("aes-ctr key and iv must be 16 bytes"))?;
+    cipher.seek(offset);
+    cipher.apply_keystream(data);
+    Ok(())
 }

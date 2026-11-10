@@ -92,6 +92,13 @@ pub enum HapPairing {
     Persistent,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PairingMethod {
+    HapTransient,
+    HapPersistent,
+    LegacyPin,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Route {
     pub auth: AuthRequirement,
@@ -100,6 +107,15 @@ pub struct Route {
 }
 
 impl Route {
+    pub fn pairing_method(&self) -> Result<PairingMethod, crate::session::SessionError> {
+        match self.auth {
+            AuthRequirement::HapTransient => Ok(PairingMethod::HapTransient),
+            AuthRequirement::HapPersistent => Ok(PairingMethod::HapPersistent),
+            AuthRequirement::LegacyPin => Ok(PairingMethod::LegacyPin),
+            ref other => Err(crate::session::SessionError::UnsupportedAuthentication(other.clone())),
+        }
+    }
+
     pub fn hap_pairing(&self) -> Result<HapPairing, crate::session::SessionError> {
         match self.auth {
             AuthRequirement::HapTransient => Ok(HapPairing::Transient),
