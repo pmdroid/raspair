@@ -3,6 +3,8 @@
 //! the buffered ALAC envelope (cookie/ssrc/ct/framing) end to end without a
 //! full encoder. Layout verified against macosforge/alac ALACEncoder.cpp.
 
+use super::pcm::quantize;
+
 const ALAC_ID_CPE: u32 = 1;
 const ALAC_ID_END: u32 = 7;
 
@@ -78,11 +80,7 @@ pub fn encode_alac_escape_frame(samples: &[f32], spf: usize) -> Vec<u8> {
     }
 
     for &s in &samples[..num_samples * 2] {
-        let s = s.clamp(-1.0, 1.0);
-        let mut val = (s * 8_388_607.0) as i32;
-        if s <= -1.0 {
-            val = -8_388_608;
-        }
+        let val = quantize(s, 24);
         w.write((val as u32) & 0xFFFFFF, 24);
     }
 
