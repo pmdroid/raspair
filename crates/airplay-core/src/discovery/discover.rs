@@ -13,6 +13,10 @@ const RAOP: &str = "_raop._tcp.local.";
 /// Browse for AirPlay receivers for `timeout`, returning one [`Device`] per
 /// unique host:port.
 pub fn discover(timeout: Duration) -> Result<Vec<Device>> {
+    discover_until(timeout, &crate::Cancellation::default())
+}
+
+pub fn discover_until(timeout: Duration, cancel: &crate::Cancellation) -> Result<Vec<Device>> {
     let daemon = ServiceDaemon::new().context("create mDNS daemon")?;
     let airplay = daemon.browse(SERVICE).context("browse mDNS")?;
     let raop = daemon.browse(RAOP).context("browse mDNS")?;
@@ -20,7 +24,7 @@ pub fn discover(timeout: Duration) -> Result<Vec<Device>> {
     let mut devices = Vec::new();
     let deadline = Instant::now() + timeout;
 
-    while Instant::now() < deadline {
+    while Instant::now() < deadline && !cancel.is_cancelled() {
         let mut idle = true;
         for (receiver, is_raop) in [(&airplay, false), (&raop, true)] {
             while let Ok(event) = receiver.try_recv() {
