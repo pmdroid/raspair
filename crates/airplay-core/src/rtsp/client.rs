@@ -11,6 +11,8 @@ use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::time::Duration;
 
+const MAX_AUTH_RETRIES: usize = 2;
+
 pub struct Client {
     addr: String,
     port: u16,
@@ -21,6 +23,8 @@ pub struct Client {
     session: String,
     defaults: BTreeMap<String, String>,
     local_addr: Option<SocketAddr>,
+    password: Option<String>,
+    challenge: Option<DigestChallenge>,
 }
 
 impl Client {
@@ -46,6 +50,8 @@ impl Client {
             session: String::new(),
             defaults: BTreeMap::new(),
             local_addr,
+            password: None,
+            challenge: None,
         })
     }
 
@@ -55,6 +61,10 @@ impl Client {
 
     pub fn set_default_header(&mut self, key: &str, value: &str) {
         self.defaults.insert(key.to_string(), value.to_string());
+    }
+
+    pub fn set_password(&mut self, password: &str) {
+        self.password = Some(password.to_string());
     }
 
     pub fn session_id(&self) -> &str {
@@ -188,16 +198,39 @@ impl Client {
                 .or_insert_with(|| self.session.clone());
         }
 
-        self.write_all(&req.serialize())?;
-        let resp = self.read_response()?;
+        let mut retries = 0;
+        loop {
+            if let (Some(password), Some(challenge)) = (&self.password, &self.challenge) {
+                let authorization = challenge.authorization(req.method, &req.url, DIGEST_USERNAME, password);
+                req.set_header(HEADER_AUTHORIZATION, &authorization);
+            }
+            self.write_all(&req.serialize())?;
+            let resp = self.read_response()?;
 
-        if let Some(sess) = resp.header(HEADER_SESSION) {
-            self.session = match sess.split_once(';') {
-                Some((s, _)) => s.to_string(),
-                None => sess.to_string(),
-            };
+            if let Some(sess) = resp.header(HEADER_SESSION) {
+                self.session = match sess.split_once(';') {
+                    Some((s, _)) => s.to_string(),
+                    None => sess.to_string(),
+                };
+            }
+            if resp.status_code != 401 {
+                return Ok(resp);
+            }
+            let previous = self.challenge.take();
+            let challenge = DigestChallenge::parse(resp.header(HEADER_WWW_AUTHENTICATE).ok_or(AuthError::MalformedChallenge)?)?;
+            if self.password.is_none() {
+                return Err(AuthError::PasswordRequired.into());
+            }
+            let sent = req.headers.contains_key(HEADER_AUTHORIZATION);
+            let renewed = previous.is_some_and(|p| p.nonce != challenge.nonce);
+            if retries == MAX_AUTH_RETRIES || (sent && !(challenge.stale && renewed)) {
+                return Err(AuthError::Rejected.into());
+            }
+            retries += 1;
+            self.challenge = Some(challenge);
+            self.cseq += 1;
+            req.set_header(HEADER_CSEQ, &self.cseq.to_string());
         }
-        Ok(resp)
     }
 
     pub fn get(&mut self, path: &str) -> Result<Response> {
