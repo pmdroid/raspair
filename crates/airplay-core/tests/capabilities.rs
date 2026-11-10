@@ -49,6 +49,12 @@ fn advertised_capabilities_resolve_typed_routes() {
         let route = parse_txt_record(&record).route();
         assert_eq!(route.auth, auth, "{name}");
         assert_eq!(route.streams, streams, "{name}");
+        let rates: &[u32] = match (streams.contains(&S::Realtime), name.starts_with("legacy")) {
+            (false, _) => &[],
+            (true, false) => &[48000],
+            (true, true) => &[44100],
+        };
+        assert_eq!(route.realtime_rates, rates, "{name}");
     }
 }
 

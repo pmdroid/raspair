@@ -1,5 +1,5 @@
 use crate::profile::{self, FallbackPolicy, ProfileSelection, ProfileTarget};
-use crate::protocol::StreamCandidate;
+use crate::protocol::Route;
 use crate::{BufferedAudioFormat, Client, Device};
 use std::net::{Shutdown, SocketAddr, TcpStream};
 use std::sync::{
@@ -30,6 +30,10 @@ pub enum SessionError {
     UnsupportedAuthentication(crate::protocol::AuthRequirement),
     #[error("receiver rejected request with status {status}")]
     ReceiverRejected { status: u16 },
+    #[error("realtime playback is 16-bit only but {requested}-bit was requested; use a buffered profile for 24-bit or request 16-bit realtime")]
+    RealtimeBitDepth { requested: u16 },
+    #[error("receiver has no validated {requested} Hz realtime profile; request a rate from Route::realtime_rates or allow a fallback")]
+    RealtimeRate { requested: u32 },
 }
 
 #[derive(Clone, Default)]
@@ -48,6 +52,18 @@ impl Cancellation {
 pub enum SessionProfile {
     Realtime { sample_rate: i32 },
     Buffered(BufferedAudioFormat),
+}
+
+impl SessionProfile {
+    pub fn realtime(sample_rate: u32, bits: u16) -> Result<Self, SessionError> {
+        if bits != 16 {
+            return Err(SessionError::RealtimeBitDepth { requested: bits });
+        }
+        if !crate::audio::convert::OUTPUT_RATES.contains(&sample_rate) {
+            return Err(SessionError::RealtimeRate { requested: sample_rate });
+        }
+        Ok(Self::Realtime { sample_rate: sample_rate as i32 })
+    }
 }
 
 #[derive(Clone)]
@@ -105,7 +121,7 @@ impl Session {
         profile::candidates(&options.profile, &options.fallback)?;
         let route = device.route();
         route.hap_pairing()?;
-        profile::preflight(&route.streams, &options.profile, &options.fallback)?;
+        profile::preflight(&route, &options.profile, &options.fallback)?;
         let mut options = options;
         let ip = device.ip().ok_or(SessionError::InvalidInput)?;
         let addr = SocketAddr::new(ip.parse().map_err(|_| SessionError::InvalidInput)?, device.port);
@@ -129,7 +145,7 @@ impl Session {
             guard.check()?;
             let rtsp = crate::rtsp::Client::from_stream(&ip, device.port, stream).map_err(translate)?;
             client.connect_transport(device, pin, rtsp).map_err(translate)?;
-            let mut target = ClientTarget { client: &mut client, streams: &route.streams };
+            let mut target = ClientTarget { client: &mut client, route: &route };
             let negotiated = profile::negotiate(&mut target, &options.profile, &options.fallback)?;
             guard.check()?;
             Ok(negotiated)
@@ -271,12 +287,12 @@ impl Drop for Deadline {
 
 struct ClientTarget<'a> {
     client: &'a mut Client,
-    streams: &'a [StreamCandidate],
+    route: &'a Route,
 }
 
 impl ProfileTarget for ClientTarget<'_> {
-    fn streams(&self) -> &[StreamCandidate] {
-        self.streams
+    fn route(&self) -> &Route {
+        self.route
     }
     fn setup(&mut self, profile: &SessionProfile) -> Result<(), SessionError> {
         match profile {

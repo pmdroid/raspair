@@ -94,6 +94,7 @@ pub enum HapPairing {
 pub struct Route {
     pub auth: AuthRequirement,
     pub streams: Vec<StreamCandidate>,
+    pub realtime_rates: Vec<u32>,
 }
 
 impl Route {
@@ -198,8 +199,16 @@ impl TxtRecord {
         streams
     }
 
+    pub fn realtime_rates(&self) -> Vec<u32> {
+        match (self.stream_candidates().contains(&StreamCandidate::Realtime), self.features.is_airplay2()) {
+            (false, _) => Vec::new(),
+            (true, true) => vec![48000],
+            (true, false) => vec![44100],
+        }
+    }
+
     pub fn route(&self) -> Route {
-        Route { auth: self.auth_requirement(), streams: self.stream_candidates() }
+        Route { auth: self.auth_requirement(), streams: self.stream_candidates(), realtime_rates: self.realtime_rates() }
     }
 }
 
