@@ -3,6 +3,7 @@
 //!   airplay discover
 //!   airplay pair  --device NAME [--pin 1234]
 //!   airplay play  --device NAME --file song.flac [--mode auto|realtime|buffered]
+//!                 (auto plays files as strict buffered PCM 24-bit/48 kHz)
 //!                 [--lossless]
 //!                 [--format aac44100|aac48000|pcm24-48|pcm24-48be|alac48000-24]
 //!                 [--pin 1234] [--volume-db -30] [--no-stereo] [--debug]
@@ -15,6 +16,8 @@ use airplay_core::client::{
     play_buffered_frames_synchronized, play_pcm_synchronized, AudioCodec, BufferedAudioFormat, Client,
 };
 use airplay_core::discovery::{self, Device};
+use airplay_core::profile::{preflight, FallbackPolicy, OutputProfile, QualityReport, SourceFormat};
+use airplay_core::SessionProfile;
 use anyhow::{anyhow, bail, Context, Result};
 use std::time::Duration;
 
@@ -170,7 +173,7 @@ fn run_play(input: &[String]) -> Result<()> {
     let mode = args.get("mode").unwrap_or("auto");
     let lossless = args.has("lossless");
     // --lossless is shorthand for buffered ALAC unless an explicit format is set.
-    let format_name = args.get("format").unwrap_or(if lossless { "alac48000-24" } else { "aac44100" });
+    let format_name = args.get("format").unwrap_or(if lossless { "alac48000-24" } else { "pcm24-48" });
 
     println!("Looking up {name:?}...");
     let (devices, dev) = lookup(name)?;
@@ -195,14 +198,22 @@ fn run_play(input: &[String]) -> Result<()> {
         match mode {
             "realtime" => false,
             "buffered" => true,
-            "auto" => lossless || (file.is_some() && dev.supports_buffered_audio()),
+            "auto" => lossless || file.is_some(),
             other => bail!("--mode must be auto, realtime, or buffered (got {other:?})"),
         }
     };
-    if buffered && !dev.supports_buffered_audio() {
-        eprintln!("warning: {} does not advertise buffered audio support", dev.name);
-    }
     let format = parse_buffered_format(format_name)?;
+    let requested = if buffered {
+        SessionProfile::Buffered(format.clone())
+    } else {
+        SessionProfile::Realtime { sample_rate: 44100 }
+    };
+    if buffered {
+        preflight(&dev.route().streams, &requested, &FallbackPolicy::Forbid).map_err(|e| {
+            anyhow!("{}: {e}; buffered {} is strict, use --mode realtime to opt into realtime", dev.name, format.name)
+        })?;
+        report_quality(file.as_deref(), &requested)?;
+    }
 
     // Stereo pair? Two receivers sharing a tsid, played in lockstep. (Not for
     // group mode.)
@@ -433,6 +444,23 @@ fn build_buffered_frames(file: &str, format: &BufferedAudioFormat) -> Result<Vec
                 .collect())
         }
     }
+}
+
+fn report_quality(file: Option<&str>, requested: &SessionProfile) -> Result<()> {
+    let output = OutputProfile::of(requested).map_err(|e| anyhow!("{e}"))?;
+    println!("Output: {output}");
+    if let Some(info) = file.and_then(|f| audio::AudioReader::open(f).ok()).map(|r| r.info().clone()) {
+        let q = QualityReport::new(SourceFormat::from(&info), output);
+        let bits = q.source.bits_per_sample.map(|b| format!("/{b}-bit")).unwrap_or_default();
+        let conversion = match (q.lossless_end_to_end, q.resampled || q.remixed || q.requantized) {
+            (true, false) => "native",
+            (true, true) => "converted losslessly",
+            (false, _) if !q.source.lossless => "converted from lossy source",
+            (false, _) => "converted",
+        };
+        println!("Source: {} {} Hz{bits}/{}ch ({conversion})", q.source.codec, q.source.sample_rate, q.source.channels);
+    }
+    Ok(())
 }
 
 fn chunked(samples: &[f32], frame_samples: usize) -> impl Iterator<Item = &[f32]> {
