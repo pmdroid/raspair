@@ -5,6 +5,7 @@
 use crate::audio::{self, PcmEncoder};
 use crate::discovery::Device;
 use crate::pairing::{identity_exists, PairingSession};
+use crate::protocol::HapPairing;
 use crate::rtsp::{setup, Client as RtspClient};
 use crate::stream::{self, BufferedStream, RealtimeStream, TimingServer};
 use crate::timing::{PtpAnchor, PtpClock};
@@ -275,6 +276,10 @@ impl Client {
     /// future connects can pair-verify). HomePods don't need this — they pair
     /// transiently at [`Client::connect`] time.
     pub fn pair(dev: &Device, pin: &str) -> Result<()> {
+        let route = dev.route();
+        if route.hap_pairing()? != HapPairing::Persistent {
+            return Err(crate::session::SessionError::UnsupportedAuthentication(route.auth).into());
+        }
         let addr = dev.ip().ok_or_else(|| anyhow!("no IP address for device"))?;
         let mut rtsp = RtspClient::connect(&addr, dev.port).context("RTSP connect")?;
         let mut session = PairingSession::new(&dev.record.device_id, pin);
@@ -287,17 +292,19 @@ impl Client {
     /// pair-setup for HomePods, pair-verify for paired Apple TVs), and switch
     /// the connection to the AirPlay 2 channel cipher.
     pub fn connect(&mut self, dev: &Device, pin: &str) -> Result<()> {
+        dev.route().hap_pairing()?;
         let addr = dev.ip().ok_or_else(|| anyhow!("no IP address for device"))?;
         let rtsp = RtspClient::connect(&addr, dev.port).context("RTSP connect")?;
         self.connect_transport(dev, pin, rtsp)
     }
 
     pub(crate) fn connect_transport(&mut self, dev: &Device, pin: &str, mut rtsp: RtspClient) -> Result<()> {
+        let pairing = dev.route().hap_pairing()?;
         self.device = Some(dev.clone());
         let addr = dev.ip().ok_or_else(|| anyhow!("no IP address for device"))?;
         let mut session = PairingSession::new(&dev.record.device_id, pin);
 
-        if dev.is_homepod() {
+        if pairing == HapPairing::Transient {
             session.pair_homepod(&mut rtsp).context("pair HomePod")?;
             self.shared_secret = session.shared_secret.clone();
         } else {

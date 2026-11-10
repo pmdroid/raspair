@@ -10,7 +10,11 @@ fn device(port: u16) -> Device {
         port,
         ipv4: Some(std::net::Ipv4Addr::LOCALHOST),
         ipv6: None,
-        record: airplay_core::protocol::TxtRecord { model: "AudioAccessory1,1".into(), ..Default::default() },
+        record: airplay_core::protocol::TxtRecord {
+            model: "AudioAccessory1,1".into(),
+            features: airplay_core::protocol::FeatureFlags(1 << 9 | 1 << 40),
+            ..Default::default()
+        },
         last_seen: 0,
     }
 }

@@ -24,6 +24,8 @@ pub enum SessionError {
     LocalPermissions,
     #[error("operation cancelled")]
     Cancelled,
+    #[error("unsupported receiver authentication")]
+    UnsupportedAuthentication(crate::protocol::AuthRequirement),
     #[error("receiver rejected request with status {status}")]
     ReceiverRejected { status: u16 },
 }
@@ -102,6 +104,15 @@ impl Session {
                 return Err(SessionError::UnsupportedProfile)
             }
             _ => {}
+        }
+        let route = device.route();
+        route.hap_pairing()?;
+        let wanted = match options.profile {
+            SessionProfile::Realtime { .. } => crate::protocol::StreamCandidate::Realtime,
+            SessionProfile::Buffered(_) => crate::protocol::StreamCandidate::Buffered,
+        };
+        if !route.streams.contains(&wanted) {
+            return Err(SessionError::UnsupportedProfile);
         }
         let ip = device.ip().ok_or(SessionError::InvalidInput)?;
         let addr = SocketAddr::new(ip.parse().map_err(|_| SessionError::InvalidInput)?, device.port);

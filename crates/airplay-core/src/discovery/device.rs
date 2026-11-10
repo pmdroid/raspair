@@ -1,6 +1,6 @@
 //! A discovered AirPlay receiver and convenience accessors over its TXT record.
 
-use crate::protocol::TxtRecord;
+use crate::protocol::{Route, TxtRecord};
 use std::net::{Ipv4Addr, Ipv6Addr};
 
 #[derive(Debug, Clone)]
@@ -45,5 +45,29 @@ impl Device {
     }
     pub fn tight_sync_id(&self) -> &str {
         &self.record.tight_sync_id
+    }
+    pub fn route(&self) -> Route {
+        self.record.route()
+    }
+}
+
+pub fn merge_device(devices: &mut Vec<Device>, device: Device) {
+    let id = device.record.device_id.clone();
+    for other in devices.iter_mut() {
+        if !id.is_empty() && other.record.device_id != id && other.port == device.port && other.ip().is_some() && other.ip() == device.ip() {
+            other.ipv4 = None;
+            other.ipv6 = None;
+        }
+    }
+    let slot = devices.iter_mut().find(|e| {
+        if id.is_empty() {
+            e.record.device_id.is_empty() && e.name == device.name && e.host == device.host && e.port == device.port
+        } else {
+            e.record.device_id == id
+        }
+    });
+    match slot {
+        Some(slot) => *slot = device,
+        None => devices.push(device),
     }
 }

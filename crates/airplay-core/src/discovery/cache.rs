@@ -1,7 +1,7 @@
 //! JSON device cache (compatible with the Go reference's `devices.json`) so
 //! repeated plays skip the multi-second mDNS scan.
 
-use super::device::Device;
+use super::device::{merge_device, Device};
 use super::discover::{discover, find_device};
 use crate::protocol::{FeatureFlags, TxtRecord};
 use anyhow::Result;
@@ -24,6 +24,10 @@ struct CachedDevice {
     group_id: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     tight_sync_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    flags: Option<u64>,
+    #[serde(default)]
+    password_required: bool,
     last_seen: i64,
 }
 
@@ -48,6 +52,9 @@ impl CachedDevice {
                 model: self.model.clone(),
                 group_id: self.group_id.clone(),
                 tight_sync_id: self.tight_sync_id.clone(),
+                flags: self.flags.unwrap_or_default(),
+                has_flags: self.flags.is_some(),
+                password_required: self.password_required,
                 ..Default::default()
             },
             last_seen: self.last_seen,
@@ -65,6 +72,8 @@ impl CachedDevice {
             features: d.record.features.0,
             group_id: d.record.group_id.clone(),
             tight_sync_id: d.record.tight_sync_id.clone(),
+            flags: d.record.has_flags.then_some(d.record.flags),
+            password_required: d.record.password_required,
             last_seen: if d.last_seen == 0 { now_unix() } else { d.last_seen },
         }
     }
@@ -89,15 +98,7 @@ fn save_cache(devices: &[Device]) -> Result<()> {
 fn merge(cached: Vec<Device>, fresh: Vec<Device>) -> Vec<Device> {
     let mut result = cached;
     for d in fresh {
-        let id = d.record.device_id.clone();
-        if let Some(slot) = result
-            .iter_mut()
-            .find(|e| !id.is_empty() && e.record.device_id == id)
-        {
-            *slot = d;
-        } else {
-            result.push(d);
-        }
+        merge_device(&mut result, d);
     }
     result
 }
@@ -113,7 +114,7 @@ pub fn load_or_discover(name: &str, timeout: Duration, max_age: Duration) -> Res
         if fresh && name.is_empty() {
             return Ok(cached);
         }
-        if !name.is_empty() && find_device(&cached, name).is_some() {
+        if !name.is_empty() && find_device(&cached, name).is_some_and(|d| d.ip().is_some() && d.record.has_flags) {
             return Ok(cached);
         }
     }
