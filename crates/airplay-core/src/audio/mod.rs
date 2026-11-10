@@ -3,15 +3,17 @@
 
 pub mod aac;
 pub mod alac;
+pub mod convert;
 pub mod decode;
 pub mod pcm;
 pub mod wav;
 
 pub use aac::{encode_aac_file, parse_adts_frames, AAC_LC_44100_STEREO_ASC, AAC_LC_48000_STEREO_ASC};
 pub use alac::{alac_magic_cookie, encode_alac_escape_frame};
+pub use convert::{ConversionPlan, Converter, OutputFormat, SourceFormat};
 pub use decode::{decode_audio_file, ffmpeg_available, AudioInfo, AudioReader, DecodedBlock, Samples, SeekResult};
 pub use symphonia::core::io::MediaSource;
-pub use pcm::PcmEncoder;
+pub use pcm::{quantize, PcmEncoder};
 
 use anyhow::Result;
 
