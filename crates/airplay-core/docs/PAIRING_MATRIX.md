@@ -31,13 +31,14 @@ fixtures pin structure and validation, not bytes.
 | `reconnect_rejects_impostor_when_receiver_ltpk_is_known` | Pair-verify M2 signed by another key fails when the receiver LTPK is known |
 | `reconnect_without_receiver_ltpk_is_not_counted_as_verified` | With no stored receiver LTPK, an impostor completes pair-verify; this counts as unverified |
 | `reconnect_fails_when_receiver_does_not_know_controller` | Receiver M4 error 0x02 surfaces for an unknown controller |
+| `tests/rtsp_auth.rs` | Open receiver: one `OPTIONS *` without `Authorization` and no record; digest: MD5 without `qop`, username `iTunes`, lowercase hex, retry with the next CSeq, one renewal on `stale=true` with a new nonce, at most three requests, malformed/`qop`/non-MD5/non-Digest challenges fail without retry, password saved per receiver and reused without a prompt |
 
 ## Rows
 
 | Row | Owner | Pair | Reconnect | Playback | Evidence |
 | -- | -- | -- | -- | -- | -- |
-| Unauthenticated receivers | PAS-1411 | open | n/a | open | gap |
-| RTSP password / digest | PAS-1411 | open | n/a | open | gap |
+| Unauthenticated receivers | PAS-1411 | fixture | n/a | open | fixture + gap |
+| RTSP password / digest | PAS-1411 | fixture | fixture | open | fixture + gap |
 | Legacy PIN / SRP (`/pair-setup-pin`) | PAS-1410 | open | open | open | gap |
 | HAP persistent, on-screen PIN | PAS-1409 | fixture | fixture | open | fixture |
 | HAP persistent, static PIN | PAS-1409 | open | open | open | gap |
@@ -62,8 +63,9 @@ required (PAS-1404). Gap: no transcript; RAOP OPTIONS/ANNOUNCE and AirPlay 2
 `WWW-Authenticate: Digest realm=..., nonce=...`. Sender retries the same request
 with `Authorization: Digest username, realm, nonce, uri, response`, where
 `response = MD5(MD5(user:realm:password):nonce:MD5(method:uri))` per RFC 2617.
-Gap: accepted username, hex case and which requests need the header must be
-taken from a capture before implementation. Reference: [RFC 2617](https://www.rfc-editor.org/rfc/rfc2617).
+The fixture pins username `iTunes`, lowercase hex, no `qop` and MD5 only; once
+a challenge is accepted every later request on the connection carries the
+header. Gap: these choices still need a receiver capture. Reference: [RFC 2617](https://www.rfc-editor.org/rfc/rfc2617).
 
 **Legacy PIN / SRP (PAS-1410).** Order: `/pair-pin-start`, then two
 `/pair-setup-pin` binary-plist requests (`method=pin`, `user` → `pk`, `salt`;

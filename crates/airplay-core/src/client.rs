@@ -5,10 +5,12 @@
 use crate::audio::{self, PcmEncoder};
 use crate::discovery::Device;
 use crate::pairing::{
-    CredentialStore, FileStore, PairingError, PairingSession, PinChallenge, PinPairings, PinSource, StoreError, Stored,
+    AuthMethod, CredentialStore, FileStore, Identity, PairingError, PairingRecord, PairingSession, PinChallenge, PinPairings,
+    PinSource, StoreError, Stored,
 };
-use crate::protocol::HapPairing;
-use crate::rtsp::{setup, Client as RtspClient};
+use crate::protocol::{AuthRequirement, HapPairing, Route};
+use crate::rtsp::request::AuthError;
+use crate::rtsp::{setup, Client as RtspClient, Method, Request};
 use crate::stream::{self, BufferedStream, RealtimeStream, TimingServer};
 use crate::timing::{PtpAnchor, PtpClock};
 use anyhow::{anyhow, bail, Context, Result};
@@ -118,6 +120,27 @@ fn duration_env(name: &str, default_ms: u64) -> Duration {
         }
     }
     Duration::from_millis(default_ms)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Access {
+    Rtsp { password: bool },
+    Hap(HapPairing),
+}
+
+fn access(route: &Route) -> Result<Access, crate::session::SessionError> {
+    match route.auth {
+        AuthRequirement::None => Ok(Access::Rtsp { password: false }),
+        AuthRequirement::Password => Ok(Access::Rtsp { password: true }),
+        _ => route.hap_pairing().map(Access::Hap),
+    }
+}
+
+fn expect_ok(resp: crate::rtsp::Response) -> Result<()> {
+    if resp.status_code != 200 {
+        return Err(crate::session::SessionError::ReceiverRejected { status: resp.status_code }.into());
+    }
+    Ok(())
 }
 
 /// Default PTP playout lead for buffered SETRATEANCHORTIME.
@@ -330,23 +353,25 @@ impl Client {
     /// pair-setup for HomePods, pair-verify for paired Apple TVs), and switch
     /// the connection to the AirPlay 2 channel cipher.
     pub fn connect(&mut self, dev: &Device, pin: &str) -> Result<()> {
-        dev.route().hap_pairing()?;
+        access(&dev.route())?;
         let addr = dev.ip().ok_or_else(|| anyhow!("no IP address for device"))?;
         let rtsp = RtspClient::connect(&addr, dev.port).context("RTSP connect")?;
         self.connect_transport(dev, pin, rtsp)
     }
 
     pub(crate) fn connect_transport(&mut self, dev: &Device, pin: &str, mut rtsp: RtspClient) -> Result<()> {
-        let pairing = dev.route().hap_pairing()?;
+        let access = access(&dev.route())?;
         self.device = Some(dev.clone());
         let addr = dev.ip().ok_or_else(|| anyhow!("no IP address for device"))?;
         let mut session = PairingSession::new(&dev.record.device_id, pin);
         session.deadline = self.deadline.clone();
 
-        if pairing == HapPairing::Transient {
+        if let Access::Rtsp { password } = access {
+            self.open_rtsp(dev, pin, password, &mut rtsp)?;
+        } else if access == Access::Hap(HapPairing::Transient) {
             session.pair_homepod(&mut rtsp).context("pair HomePod")?;
             self.shared_secret = session.shared_secret.clone();
-        } else if pairing == HapPairing::TransientPassword {
+        } else if access == Access::Hap(HapPairing::TransientPassword) {
             let store = self.credential_store()?;
             session
                 .pair_transient_password(&mut rtsp, self.password.as_deref(), store.as_ref())
@@ -366,8 +391,10 @@ impl Client {
             self.shared_secret = session.shared_secret.clone();
         }
 
-        rtsp.enable_encryption(&self.shared_secret)
-            .context("enable channel encryption")?;
+        if let Access::Hap(_) = access {
+            rtsp.enable_encryption(&self.shared_secret)
+                .context("enable channel encryption")?;
+        }
 
         let client_instance = rand_hex(8);
         rtsp.set_default_header("DACP-ID", &client_instance);
@@ -378,14 +405,60 @@ impl Client {
         self.session_num = rand_u32();
         self.rtsp_path = format!("rtsp://{}/{}", self.local_ip, self.session_num);
 
-        let info = rtsp.info().context("RTSP info")?;
-        if info.status_code != 200 {
-            return Err(crate::session::SessionError::ReceiverRejected { status: info.status_code as u16 }.into());
+        if let Access::Hap(_) = access {
+            let info = rtsp.info().context("RTSP info")?;
+            if info.status_code != 200 {
+                return Err(crate::session::SessionError::ReceiverRejected { status: info.status_code as u16 }.into());
+            }
+            self.session = Some(session);
         }
 
-        self.session = Some(session);
         self.rtsp = Some(rtsp);
         Ok(())
+    }
+
+    fn open_rtsp(&mut self, dev: &Device, pin: &str, password: bool, rtsp: &mut RtspClient) -> Result<()> {
+        if !password {
+            return expect_ok(rtsp.do_request(Request::new(Method::Options, "*"))?);
+        }
+        let id = dev.record.device_id.clone();
+        let store = self.credential_store()?;
+        let saved = match store.load(&id)? {
+            Stored::Paired(r) if r.method != AuthMethod::Password => bail!(PairingError::InvalidRecord),
+            Stored::Paired(r) if r.receiver_id == id && !id.is_empty() => r.password,
+            _ => None,
+        };
+        let supplied = self.password.clone().unwrap_or_else(|| pin.to_string());
+        let mut candidates: Vec<String> = saved.iter().cloned().collect();
+        if !supplied.is_empty() && saved != Some(supplied.clone()) {
+            candidates.push(supplied);
+        }
+        if candidates.is_empty() {
+            return Err(AuthError::PasswordRequired.into());
+        }
+        let last = candidates.len() - 1;
+        for (i, candidate) in candidates.into_iter().enumerate() {
+            rtsp.set_password(&candidate);
+            let resp = match rtsp.do_request(Request::new(Method::Options, "*")) {
+                Err(e) if i < last && e.downcast_ref() == Some(&AuthError::Rejected) => continue,
+                other => other?,
+            };
+            expect_ok(resp)?;
+            if !id.is_empty() && saved.as_ref() != Some(&candidate) {
+                let controller_key = Identity::generate();
+                store.save(&PairingRecord {
+                    method: AuthMethod::Password,
+                    receiver_id: id.clone(),
+                    controller_id: hex::encode(controller_key.public_key()),
+                    accessory_id: String::new(),
+                    controller_key,
+                    accessory_public_key: None,
+                    password: Some(candidate),
+                })?;
+            }
+            return Ok(());
+        }
+        Err(AuthError::Rejected.into())
     }
 
     pub fn setup_realtime(&mut self, sample_rate: i32, _channels: i32) -> Result<()> {

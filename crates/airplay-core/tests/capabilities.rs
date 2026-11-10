@@ -90,9 +90,10 @@ fn unsupported_auth_is_rejected_before_any_exchange() {
             Err(e) => assert_eq!(e, expected),
             Ok(_) => panic!("connected with {record:?}"),
         }
-        let mut client = Client::new();
-        let err = client.connect(&dev, "3939").unwrap_err();
-        assert_eq!(err.downcast_ref::<SessionError>(), Some(&expected));
+        if !matches!(dev.route().auth, A::None | A::Password) {
+            let err = Client::new().connect(&dev, "3939").unwrap_err();
+            assert_eq!(err.downcast_ref::<SessionError>(), Some(&expected));
+        }
         let err = Client::pair(&dev, "3939").unwrap_err();
         assert_eq!(err.downcast_ref::<SessionError>(), Some(&expected));
     }
