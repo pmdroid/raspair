@@ -10,11 +10,12 @@ fn apple_tv(port: u16, id: &str) -> Device {
         port,
         ipv4: Some(std::net::Ipv4Addr::LOCALHOST),
         ipv6: None,
-        record: airplay_core::protocol::TxtRecord {
-            model: "AppleTV6,2".into(),
-            device_id: id.into(),
-            ..Default::default()
-        },
+        record: airplay_core::protocol::parse_txt_record(&[
+            format!("deviceid={id}"),
+            "features=0x4A7FDFD5,0xBC157FDE".into(),
+            "flags=0x244".into(),
+            "model=AppleTV11,1".into(),
+        ]),
         last_seen: 0,
     }
 }
@@ -40,12 +41,12 @@ fn closing_receiver() -> (u16, std::thread::JoinHandle<()>) {
 #[test]
 fn failed_pair_setup_keeps_prior_record() {
     let store = MemoryStore::default();
-    let prior = record("AA:BB:CC:DD:EE:FF");
+    let prior = record("aa:bb:cc:dd:ee:ff");
     store.save(&prior).unwrap();
     let (port, receiver) = closing_receiver();
-    assert!(Client::pair_with_store(&apple_tv(port, "AA:BB:CC:DD:EE:FF"), "1234", &store).is_err());
+    assert!(Client::pair_with_store(&apple_tv(port, "aa:bb:cc:dd:ee:ff"), "1234", &store).is_err());
     receiver.join().unwrap();
-    match store.load("AA:BB:CC:DD:EE:FF").unwrap() {
+    match store.load("aa:bb:cc:dd:ee:ff").unwrap() {
         Stored::Paired(r) => assert_eq!(r.controller_key.seed(), prior.controller_key.seed()),
         other => panic!("prior record lost: {other:?}"),
     }
@@ -55,11 +56,11 @@ fn failed_pair_setup_keeps_prior_record() {
 fn legacy_key_does_not_establish_trust() {
     let dir = std::env::temp_dir().join(format!("airplay-legacy-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    let legacy = dir.join("AA:BB:CC:DD:EE:01.pem");
+    let legacy = dir.join("aa:bb:cc:dd:ee:01.pem");
     std::fs::write(&legacy, b"-----BEGIN ED25519 PRIVATE KEY-----\n").unwrap();
     let options = SessionOptions { credentials: Some(Arc::new(FileStore::new(&dir))), ..Default::default() };
     let (port, receiver) = closing_receiver();
-    let result = Session::connect(&apple_tv(port, "AA:BB:CC:DD:EE:01"), "1234", options);
+    let result = Session::connect(&apple_tv(port, "aa:bb:cc:dd:ee:01"), "1234", options);
     assert_eq!(result.err(), Some(SessionError::ChallengeRequired));
     receiver.join().unwrap();
     assert!(legacy.exists());
