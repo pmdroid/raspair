@@ -210,11 +210,19 @@ impl Session {
         }
         profile::candidates(&options.profile, &options.fallback)?;
         let route = device.route();
-        route.hap_pairing()?;
+        let legacy = device.record.is_legacy_raop();
+        match legacy {
+            true => crate::rtsp::raop::admit(&device.record).map(drop)?,
+            false => route.hap_pairing().map(drop)?,
+        }
+        let port = match (legacy, device.record.raop_port) {
+            (true, raop) if raop != 0 => raop,
+            _ => device.port,
+        };
         profile::preflight(&route, &options.profile, &options.fallback)?;
         let mut options = options;
         let ip = device.ip().ok_or(SessionError::InvalidInput)?;
-        let addr = SocketAddr::new(ip.parse().map_err(|_| SessionError::InvalidInput)?, device.port);
+        let addr = SocketAddr::new(ip.parse().map_err(|_| SessionError::InvalidInput)?, port);
         let socket = Sockets::default();
         let guard = Deadline::new(socket.clone(), options.connection_timeout, options.cancellation.clone());
         let mut client = Client::new();
@@ -245,7 +253,7 @@ impl Session {
             };
             socket.lock().unwrap().push(stream.try_clone().map_err(|e| translate(e.into()))?);
             guard.check()?;
-            let rtsp = crate::rtsp::Client::from_stream(&ip, device.port, stream).map_err(translate)?;
+            let rtsp = crate::rtsp::Client::from_stream(&ip, port, stream).map_err(translate)?;
             client.connect_transport(device, pin, rtsp).map_err(translate)?;
             let mut target = ClientTarget { client: &mut client, route: &route };
             let negotiated = profile::negotiate(&mut target, &options.profile, &options.fallback)?;
@@ -254,7 +262,7 @@ impl Session {
         })();
         let result = guard.check().and(result);
         drop(guard);
-        let (effective, selection) = match result {
+        let (effective, mut selection) = match result {
             Ok(negotiated) => negotiated,
             Err(error) => {
                 for s in socket.lock().unwrap().drain(..) {
@@ -265,13 +273,17 @@ impl Session {
             }
         };
         client.deadline = None;
+        if let Some(codec) = client.legacy_codec() {
+            selection.effective.codec = codec;
+        }
+        let codec = client.legacy_codec().unwrap_or(crate::client::AudioCodec::Pcm);
         for s in socket.lock().unwrap().iter() {
             s.set_read_timeout(Some(options.shutdown_timeout)).map_err(|e| translate(e.into()))?;
             s.set_write_timeout(Some(options.shutdown_timeout)).map_err(|e| translate(e.into()))?;
         }
         let realtime = match effective {
             SessionProfile::Realtime { sample_rate } => {
-                Some(RealtimeSender::new(sample_rate as u32, client.realtime_latency().unwrap_or_default()))
+                Some(RealtimeSender::with_codec(sample_rate as u32, client.realtime_latency().unwrap_or_default(), codec))
             }
             SessionProfile::Buffered(_) => None,
         };

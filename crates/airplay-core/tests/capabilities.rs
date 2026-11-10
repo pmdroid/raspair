@@ -85,8 +85,9 @@ fn unsupported_auth_is_rejected_before_any_exchange() {
         let refs: Vec<&str> = record.iter().map(String::as_str).collect();
         let dev = device(&refs);
         let expected = SessionError::UnsupportedAuthentication(dev.route().auth);
+        let session_error = if dev.record.is_legacy_raop() { SessionError::UnsupportedProfile } else { expected.clone() };
         match Session::connect(&dev, "3939", SessionOptions::default()) {
-            Err(e) => assert_eq!(e, expected),
+            Err(e) => assert_eq!(e, session_error),
             Ok(_) => panic!("connected with {record:?}"),
         }
         if !matches!(dev.route().auth, A::None | A::Password) {
@@ -100,7 +101,7 @@ fn unsupported_auth_is_rejected_before_any_exchange() {
     assert_eq!(legacy.route().pairing_method(), Ok(airplay_core::protocol::PairingMethod::LegacyPin));
     assert_eq!(
         Session::connect(&legacy, "3939", SessionOptions::default()).err(),
-        Some(SessionError::UnsupportedAuthentication(A::LegacyPin))
+        Some(SessionError::UnsupportedProfile)
     );
     let err = Client::pair(&device(HOMEPOD), "3939").unwrap_err();
     assert_eq!(err.downcast_ref::<SessionError>(), Some(&SessionError::UnsupportedAuthentication(A::HapTransient)));

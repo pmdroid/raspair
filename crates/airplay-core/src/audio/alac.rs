@@ -64,11 +64,15 @@ impl BitWriter {
 /// float-to-int conversion matches the PCM encoder, so escape output is
 /// bit-identical to the 24-bit PCM path.
 pub fn encode_alac_escape_frame(samples: &[f32], spf: usize) -> Vec<u8> {
+    encode_alac_escape_frame_bits(samples, spf, 24)
+}
+
+pub fn encode_alac_escape_frame_bits(samples: &[f32], spf: usize, bits: u32) -> Vec<u8> {
     let mut num_samples = samples.len() / 2;
     if num_samples > spf {
         num_samples = spf;
     }
-    let mut w = BitWriter::new(num_samples * 6 + 8);
+    let mut w = BitWriter::new(num_samples * bits as usize / 4 + 8);
 
     w.write(ALAC_ID_CPE, 3);
     w.write(0, 4); // stereo element instance tag
@@ -80,8 +84,8 @@ pub fn encode_alac_escape_frame(samples: &[f32], spf: usize) -> Vec<u8> {
     }
 
     for &s in &samples[..num_samples * 2] {
-        let val = quantize(s, 24);
-        w.write((val as u32) & 0xFFFFFF, 24);
+        let val = quantize(s, bits);
+        w.write((val as u32) & ((1 << bits) - 1), bits as usize);
     }
 
     w.write(ALAC_ID_END, 3);

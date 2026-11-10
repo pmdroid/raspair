@@ -10,7 +10,7 @@ use crate::pairing::{
 };
 use crate::protocol::{AuthRequirement, HapPairing, PairingMethod, Route};
 use crate::rtsp::request::AuthError;
-use crate::rtsp::{setup, Client as RtspClient, Method, Request};
+use crate::rtsp::{raop, setup, Client as RtspClient, Method, Request};
 use crate::stream::{self, BufferedStream, RealtimeStream, TimingServer};
 use crate::timing::{PtpAnchor, PtpClock};
 use anyhow::{anyhow, bail, Context, Result};
@@ -184,6 +184,7 @@ pub struct Client {
     credentials: Option<Arc<dyn CredentialStore>>,
     password: Option<String>,
     pub(crate) member: Option<String>,
+    legacy: Option<AudioCodec>,
 }
 
 impl Default for Client {
@@ -223,6 +224,7 @@ impl Client {
             credentials: None,
             password: None,
             member: None,
+            legacy: None,
         }
     }
 
@@ -405,6 +407,7 @@ impl Client {
             match self.credential_store()?.load(&dev.record.device_id) {
                 Ok(Stored::Paired(record)) if access == Access::Legacy => {
                     self.shared_secret = crate::pairing::legacy::verify(&record, &mut rtsp).context("pair-verify")?;
+                    expect_ok(rtsp.do_request(Request::new(Method::Options, "*"))?)?;
                 }
                 Ok(Stored::Paired(record)) if record.method == AuthMethod::LegacyPin => {
                     return Err(PairingError::InvalidRecord.into())
@@ -494,6 +497,9 @@ impl Client {
     }
 
     pub fn setup_realtime(&mut self, sample_rate: i32, _channels: i32) -> Result<()> {
+        if self.device.as_ref().is_some_and(|d| d.record.is_legacy_raop()) {
+            return self.setup_legacy(sample_rate);
+        }
         self.setup_stream(
             StreamType::Realtime,
             AudioCodec::Pcm,
@@ -502,6 +508,38 @@ impl Client {
             setup::AUDIO_FORMAT_PCM_44100_16_2,
             None,
         )
+    }
+
+    fn setup_legacy(&mut self, sample_rate: i32) -> Result<()> {
+        let dev = self.device.clone().ok_or_else(|| anyhow!("not connected"))?;
+        let addr = dev.ip().ok_or_else(|| anyhow!("device has no IP"))?;
+        let codec = raop::admit(&dev.record)?;
+        let timing = TimingServer::start().context("start timing server")?;
+        let mut streamer = RealtimeStream::new(&[], &addr, sample_rate, 352, self.session_num)?;
+        let path = self.rtsp_path.clone();
+        let sdp = raop::sdp(self.session_num, &self.local_ip, &addr, codec, sample_rate, 352);
+        expect_ok(self.rtsp_mut().do_request(raop::new_announce(&path, &sdp)).context("announce")?)?;
+        let setup = raop::new_setup(&path, streamer.local_control_port(), timing.port());
+        let resp = self.rtsp_mut().do_request(setup).context("legacy SETUP")?;
+        if resp.status_code != 200 {
+            return Err(crate::session::SessionError::ReceiverRejected { status: resp.status_code }.into());
+        }
+        let (data_port, control_port) = raop::parse_transport(&resp)?;
+        streamer.start(data_port, control_port).context("start stream")?;
+        let record = raop::new_record(&path, streamer.seq(), streamer.rtp_timestamp());
+        expect_ok(self.rtsp_mut().do_request(record).context("record")?)?;
+        self.timing = Some(timing);
+        self.streamer = Some(streamer);
+        self.legacy = Some(codec);
+        let vol = self.volume_db;
+        if let Err(e) = self.set_volume(vol) {
+            log::warn!("set volume failed (continuing): {e}");
+        }
+        Ok(())
+    }
+
+    pub fn legacy_codec(&self) -> Option<AudioCodec> {
+        self.legacy
     }
 
     /// Experimental: set up a buffered stream into an **entertainment /
@@ -1378,7 +1416,7 @@ fn feedback_if_due(c: &mut Client) {
 }
 
 fn feedback_checked(c: &mut Client) -> Result<()> {
-    if c.last_feedback.elapsed() >= Duration::from_secs(2) {
+    if c.legacy.is_none() && c.last_feedback.elapsed() >= Duration::from_secs(2) {
         c.last_feedback = Instant::now();
         let rtsp = c.rtsp.as_mut().ok_or(crate::session::SessionError::ConnectionLost)?;
         let resp = rtsp.do_request(setup::new_feedback()).context("feedback")?;

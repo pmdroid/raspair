@@ -49,6 +49,9 @@ fn sighting(info: &ServiceInfo, is_raop: bool) -> Device {
     let instance = fullname.split(service).next().unwrap_or(&fullname).to_string();
     let txt: Vec<String> = info.get_properties().iter().map(|p| format!("{}={}", p.key(), p.val_str())).collect();
     let mut record = parse_txt_record(&txt);
+    if is_raop {
+        record.raop_port = info.get_port();
+    }
     let name = match instance.split_once('@') {
         Some((mac, name)) if is_raop => {
             if record.device_id.is_empty() && mac.len() == 12 {
@@ -84,6 +87,9 @@ pub fn merge_sighting(devices: &mut Vec<Device>, mut device: Device, is_raop: bo
     if let Some(existing) = devices.iter_mut().find(|e| !id.is_empty() && e.record.device_id == id) {
         if is_raop {
             existing.record.password_required |= device.record.password_required;
+            existing.record.raop_port = device.record.raop_port;
+            existing.record.raop_codecs = std::mem::take(&mut device.record.raop_codecs);
+            existing.record.raop_encryption = std::mem::take(&mut device.record.raop_encryption);
             if device.ip().is_some() {
                 existing.ipv4 = device.ipv4.or(existing.ipv4);
                 existing.ipv6 = device.ipv6.or(existing.ipv6);
@@ -93,6 +99,9 @@ pub fn merge_sighting(devices: &mut Vec<Device>, mut device: Device, is_raop: bo
             return;
         }
         device.record.password_required |= existing.record.password_required;
+        device.record.raop_port = existing.record.raop_port;
+        device.record.raop_codecs = std::mem::take(&mut existing.record.raop_codecs);
+        device.record.raop_encryption = std::mem::take(&mut existing.record.raop_encryption);
     }
     merge_device(devices, device);
 }

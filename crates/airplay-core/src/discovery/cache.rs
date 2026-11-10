@@ -28,7 +28,17 @@ struct CachedDevice {
     flags: Option<u64>,
     #[serde(default)]
     password_required: bool,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    raop_port: u16,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    raop_codecs: Vec<u8>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    raop_encryption: Vec<u8>,
     last_seen: i64,
+}
+
+fn is_zero(port: &u16) -> bool {
+    *port == 0
 }
 
 fn config_path() -> PathBuf {
@@ -55,6 +65,9 @@ impl CachedDevice {
                 flags: self.flags.unwrap_or_default(),
                 has_flags: self.flags.is_some(),
                 password_required: self.password_required,
+                raop_port: self.raop_port,
+                raop_codecs: self.raop_codecs.clone(),
+                raop_encryption: self.raop_encryption.clone(),
                 ..Default::default()
             },
             last_seen: self.last_seen,
@@ -74,6 +87,9 @@ impl CachedDevice {
             tight_sync_id: d.record.tight_sync_id.clone(),
             flags: d.record.has_flags.then_some(d.record.flags),
             password_required: d.record.password_required,
+            raop_port: d.record.raop_port,
+            raop_codecs: d.record.raop_codecs.clone(),
+            raop_encryption: d.record.raop_encryption.clone(),
             last_seen: if d.last_seen == 0 { now_unix() } else { d.last_seen },
         }
     }

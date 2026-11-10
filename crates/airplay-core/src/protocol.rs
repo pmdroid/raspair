@@ -144,6 +144,9 @@ pub struct TxtRecord {
     pub public_key: Vec<u8>,
     pub pairing_identity: String,
     pub auth_status: i32,
+    pub raop_port: u16,
+    pub raop_codecs: Vec<u8>,
+    pub raop_encryption: Vec<u8>,
 }
 
 impl TxtRecord {
@@ -165,6 +168,10 @@ impl TxtRecord {
 
     fn status(&self, bit: u64) -> bool {
         self.has_flags && self.flags & bit != 0
+    }
+
+    pub fn is_legacy_raop(&self) -> bool {
+        !self.features.is_airplay2() && self.route().streams.contains(&StreamCandidate::Realtime)
     }
 
     pub fn displays_pin(&self) -> bool {
@@ -310,6 +317,9 @@ pub fn parse_txt_record(txt: &[String]) -> TxtRecord {
     if let Some(v) = map.get("pi") {
         r.pairing_identity = v.clone();
     }
+    let list = |key: &str| map.get(key).map(|v| v.split(',').filter_map(|c| c.trim().parse().ok()).collect()).unwrap_or_default();
+    r.raop_codecs = list("cn");
+    r.raop_encryption = list("et");
     if let Some(v) = map.get("authstatus") {
         if let Ok(n) = v.parse() {
             r.auth_status = n;
