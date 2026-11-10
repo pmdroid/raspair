@@ -2,7 +2,7 @@ use crate::profile::{self, FallbackPolicy, ProfileSelection, ProfileTarget};
 use crate::audio::convert::OutputFormat;
 use crate::pairing::{CredentialStore, StoreError};
 use crate::protocol::Route;
-use crate::stream::{RealtimeProgress, RealtimeSender};
+use crate::stream::{BufferedCodec, BufferedFeed, BufferedProducer, BufferedProgress, RealtimeProgress, RealtimeSender};
 use crate::{BufferedAudioFormat, Client, Device};
 use std::net::{Shutdown, SocketAddr, TcpStream};
 use std::sync::{
@@ -100,6 +100,7 @@ impl Default for SessionOptions {
 pub enum SessionEvent {
     Connected,
     Profile(ProfileSelection),
+    Buffered(BufferedProgress),
     Stopped,
     Failed(SessionError),
 }
@@ -173,12 +174,12 @@ impl Session {
             }
         };
         client.deadline = None;
+        if let Some(s) = socket.lock().unwrap().as_ref() {
+            s.set_read_timeout(Some(options.shutdown_timeout)).map_err(|e| translate(e.into()))?;
+            s.set_write_timeout(Some(options.shutdown_timeout)).map_err(|e| translate(e.into()))?;
+        }
         let realtime = match effective {
             SessionProfile::Realtime { sample_rate } => {
-                if let Some(s) = socket.lock().unwrap().as_ref() {
-                    s.set_read_timeout(Some(options.shutdown_timeout)).map_err(|e| translate(e.into()))?;
-                    s.set_write_timeout(Some(options.shutdown_timeout)).map_err(|e| translate(e.into()))?;
-                }
                 Some(RealtimeSender::new(sample_rate as u32, client.realtime_latency().unwrap_or_default()))
             }
             SessionProfile::Buffered(_) => None,
@@ -236,6 +237,57 @@ impl Session {
             }
         }
         result
+    }
+
+    pub fn buffered_source(&self) -> Result<(BufferedProducer, BufferedFeed), SessionError> {
+        match &self.options.profile {
+            SessionProfile::Buffered(format) => {
+                BufferedCodec::of(format)?;
+                Ok(crate::stream::buffered_queue(format.sample_rate as u32))
+            }
+            SessionProfile::Realtime { .. } => Err(SessionError::UnsupportedProfile),
+        }
+    }
+
+    pub fn stream_buffered(&mut self, feed: &BufferedFeed) -> Result<BufferedProgress, SessionError> {
+        let cancellation = self.options.cancellation.clone();
+        let result = self.drive_buffered(feed, &cancellation);
+        if let Err(ref error) = result {
+            feed.close(error.clone());
+            if *error != SessionError::Cancelled {
+                self.events.push(SessionEvent::Failed(error.clone()));
+            }
+            let _ = self.stop();
+        }
+        result
+    }
+
+    fn drive_buffered(&mut self, feed: &BufferedFeed, cancellation: &Cancellation) -> Result<BufferedProgress, SessionError> {
+        if cancellation.is_cancelled() {
+            return Err(SessionError::Cancelled);
+        }
+        let SessionProfile::Buffered(format) = &self.options.profile else {
+            return Err(SessionError::UnsupportedProfile);
+        };
+        let client = self.client.as_mut().ok_or(SessionError::ConnectionLost)?;
+        if !client.has_buffered() {
+            return Err(SessionError::UnsupportedProfile);
+        }
+        let guard = Deadline::new(self.socket.clone(), self.options.connection_timeout, cancellation.clone());
+        client.deadline = Some((guard.end, cancellation.clone()));
+        let armed = crate::client::arm_buffered_synchronized(std::slice::from_mut(client));
+        client.deadline = None;
+        let armed = guard.check().and(armed.map_err(translate));
+        drop(guard);
+        let anchor_local = armed?;
+        let events = &mut self.events;
+        let mut on_progress = |p: BufferedProgress| match events.last_mut() {
+            Some(SessionEvent::Buffered(last)) => *last = p,
+            _ => events.push(SessionEvent::Buffered(p)),
+        };
+        let cancelled = || cancellation.is_cancelled();
+        crate::client::stream_buffered_armed(std::slice::from_mut(client), format, anchor_local, feed, &cancelled, &mut on_progress)
+            .map_err(|e| if cancellation.is_cancelled() { SessionError::Cancelled } else { translate(e) })
     }
 
     pub fn profile(&self) -> Option<ProfileSelection> {
@@ -425,6 +477,23 @@ mod tests {
         assert!(start.elapsed() < session.options.shutdown_timeout);
         assert_eq!(session.events().collect::<Vec<_>>(), vec![SessionEvent::Stopped]);
         assert_eq!(std::io::Read::read(&mut receiver, &mut [0]).unwrap(), 0);
+    }
+
+    #[test]
+    fn buffered_source_requires_a_24_bit_48k_buffered_profile_and_failures_close_the_feed() {
+        let (mut session, _data) = realtime_session();
+        assert!(matches!(session.buffered_source(), Err(SessionError::UnsupportedProfile)));
+        for format in [BufferedAudioFormat::pcm_48000_24_stereo(true), BufferedAudioFormat::alac_48000_24_stereo()] {
+            session.options.profile = SessionProfile::Buffered(format);
+            assert!(session.buffered_source().is_ok());
+        }
+        let (producer, feed) = session.buffered_source().unwrap();
+        session.client = Some(Client::new());
+        assert_eq!(session.stream_buffered(&feed), Err(SessionError::UnsupportedProfile));
+        assert_eq!(producer.push(&[0.0; 2]), Err(SessionError::UnsupportedProfile));
+        assert_eq!(session.events().collect::<Vec<_>>(), vec![SessionEvent::Failed(SessionError::UnsupportedProfile), SessionEvent::Stopped]);
+        session.options.profile = SessionProfile::Buffered(BufferedAudioFormat::aac_48000_stereo());
+        assert!(matches!(session.buffered_source(), Err(SessionError::UnsupportedProfile)));
     }
 
     fn realtime_session() -> (Session, std::net::UdpSocket) {
