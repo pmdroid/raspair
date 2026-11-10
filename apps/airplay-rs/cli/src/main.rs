@@ -4,6 +4,7 @@
 //!   airplay pair  --device ID|NAME [--json]
 //!   airplay paired [--json]
 //!   airplay forget --device ID|NAME [--json]
+//!   airplay tui   [PATH...] [--device ID|NAME] [--recursive] [--reduced-motion]
 //!   airplay play  PATH... --device ID|NAME [--recursive] [--mode buffered]
 //!                 (plays files as strict buffered PCM 24-bit/48 kHz)
 //!                 [--codec pcm|pcm-be|alac] [--fallback CODEC,...] [--lossless]
@@ -18,6 +19,7 @@ use std::sync::Arc;
 
 mod auth;
 mod play;
+mod tui;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -30,6 +32,7 @@ fn main() {
     let result = match cmd {
         "discover" | "pair" | "paired" | "forget" => run_auth(cmd, rest),
         "play" => Ok(play::run(rest)),
+        "tui" => Ok(tui::run(rest)),
         "-h" | "--help" | "help" => {
             print_usage();
             Ok(0)
@@ -66,7 +69,7 @@ fn state_dir_arg(rest: &[String]) -> Option<String> {
 
 fn print_usage() {
     eprintln!(
-        "Usage:\n  airplay discover [--json]\n  airplay pair --device ID|NAME [--json]\n  airplay paired [--json]\n  airplay forget --device ID|NAME [--json]\n  airplay play PATH... --device ID|NAME [--file FILE] [--recursive] [--mode buffered]\n               [--codec pcm|pcm-be|alac] [--fallback CODEC,...] [--lossless]\n               [--pin 1234] [--volume-db -30] [--no-stereo] [--json] [--debug]\n\n  --state-dir DIR  pairing and device state (default: $AIRPLAY_CONFIG_DIR, then ~/.airplay)\n  pair prompts for PINs and passwords without echo; without a terminal it\n  prints the required challenge and exits with status 2\n  forget removes only the local record; the receiver is not contacted\n  play queues files in argument order and folders in natural order; --recursive\n  includes subfolders. Output is strict buffered 24-bit/48 kHz; --fallback names\n  other lossless codecs that may be used instead and the effective format is printed.\n  --json writes one event object per line. Exit status: 2 pairing required,\n  3 unsupported profile, 64 invalid invocation, 130 cancelled, 1 playback failure"
+        "Usage:\n  airplay discover [--json]\n  airplay pair --device ID|NAME [--json]\n  airplay paired [--json]\n  airplay forget --device ID|NAME [--json]\n  airplay play PATH... --device ID|NAME [--file FILE] [--recursive] [--mode buffered]\n               [--codec pcm|pcm-be|alac] [--fallback CODEC,...] [--lossless]\n               [--pin 1234] [--volume-db -30] [--no-stereo] [--json] [--debug]\n  airplay tui [PATH...] [--device ID|NAME] [--recursive] [--reduced-motion]\n\n  --state-dir DIR  pairing and device state (default: $AIRPLAY_CONFIG_DIR, then ~/.airplay)\n  pair prompts for PINs and passwords without echo; without a terminal it\n  prints the required challenge and exits with status 2\n  forget removes only the local record; the receiver is not contacted\n  play queues files in argument order and folders in natural order; --recursive\n  includes subfolders. Output is strict buffered 24-bit/48 kHz; --fallback names\n  other lossless codecs that may be used instead and the effective format is printed.\n  --json writes one event object per line. Exit status: 2 pairing required,\n  3 unsupported profile, 64 invalid invocation, 130 cancelled, 1 playback failure\n  tui opens the terminal player and starts playback when --device is given;\n  NO_COLOR disables color and AIRPLAY_REDUCED_MOTION stops animation"
     );
 }
 
