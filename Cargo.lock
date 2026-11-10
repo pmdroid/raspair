@@ -52,7 +52,10 @@ version = "0.1.0"
 dependencies = [
  "airplay-core",
  "anyhow",
+ "libc",
  "log",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]
