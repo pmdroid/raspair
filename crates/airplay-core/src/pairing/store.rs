@@ -30,7 +30,7 @@ pub struct PairingRecord {
     pub controller_id: String,
     pub accessory_id: String,
     pub controller_key: Identity,
-    pub accessory_public_key: [u8; 32],
+    pub accessory_public_key: Option<[u8; 32]>,
     pub password: Option<String>,
 }
 
@@ -42,7 +42,7 @@ impl fmt::Debug for PairingRecord {
             .field("controller_id", &self.controller_id)
             .field("accessory_id", &self.accessory_id)
             .field("controller_key", &"<redacted>")
-            .field("accessory_public_key", &hex::encode(self.accessory_public_key))
+            .field("accessory_public_key", &self.accessory_public_key.map(hex::encode))
             .field("password", &self.password.as_ref().map(|_| "<redacted>"))
             .finish()
     }
@@ -124,7 +124,8 @@ struct RecordFile {
     controller_id: String,
     accessory_id: String,
     controller_seed: String,
-    accessory_public_key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    accessory_public_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     password: Option<String>,
 }
@@ -204,9 +205,15 @@ impl FileStore {
         let raw: RecordFile = serde_json::from_slice(&data).map_err(malformed)?;
         let invalid = |field| StoreError::InvalidField { path: path.into(), field };
         let seed: [u8; 32] = decode32(&raw.controller_seed).ok_or_else(|| invalid("controller_seed"))?;
-        let accessory_public_key = decode32(&raw.accessory_public_key)
-            .filter(|k| ed25519_dalek::VerifyingKey::from_bytes(k).is_ok())
-            .ok_or_else(|| invalid("accessory_public_key"))?;
+        let accessory_public_key = match (&raw.accessory_public_key, raw.method) {
+            (None, AuthMethod::Password) => None,
+            (key, _) => Some(
+                key.as_deref()
+                    .and_then(decode32)
+                    .filter(|k| ed25519_dalek::VerifyingKey::from_bytes(k).is_ok())
+                    .ok_or_else(|| invalid("accessory_public_key"))?,
+            ),
+        };
         Ok(Some(PairingRecord {
             method: raw.method,
             receiver_id: raw.receiver_id,
@@ -249,7 +256,7 @@ impl CredentialStore for FileStore {
             controller_id: record.controller_id.clone(),
             accessory_id: record.accessory_id.clone(),
             controller_seed: hex::encode(record.controller_key.seed()),
-            accessory_public_key: hex::encode(record.accessory_public_key),
+            accessory_public_key: record.accessory_public_key.map(hex::encode),
             password: record.password.clone(),
         })
         .map_err(|e| io_err(&self.dir, e.into()))?;
@@ -326,7 +333,7 @@ mod tests {
             receiver_id: receiver_id.into(),
             controller_id: hex::encode(key.public_key()),
             accessory_id: format!("acc-{receiver_id}"),
-            accessory_public_key: Identity::generate().public_key(),
+            accessory_public_key: Some(Identity::generate().public_key()),
             controller_key: key,
             password: Some("hunter2-secret".into()),
         }

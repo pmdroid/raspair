@@ -153,6 +153,7 @@ pub struct Client {
     last_feedback: Instant,
     pub(crate) deadline: Option<(Instant, crate::session::Cancellation)>,
     credentials: Option<Arc<dyn CredentialStore>>,
+    password: Option<String>,
 }
 
 impl Default for Client {
@@ -190,11 +191,16 @@ impl Client {
             last_feedback: Instant::now(),
             deadline: None,
             credentials: None,
+            password: None,
         }
     }
 
     pub fn set_credential_store(&mut self, store: Arc<dyn CredentialStore>) {
         self.credentials = Some(store);
+    }
+
+    pub fn set_password(&mut self, password: &str) {
+        self.password = Some(password.to_string());
     }
 
     fn credential_store(&mut self) -> Result<Arc<dyn CredentialStore>> {
@@ -335,9 +341,16 @@ impl Client {
         self.device = Some(dev.clone());
         let addr = dev.ip().ok_or_else(|| anyhow!("no IP address for device"))?;
         let mut session = PairingSession::new(&dev.record.device_id, pin);
+        session.deadline = self.deadline.clone();
 
         if pairing == HapPairing::Transient {
             session.pair_homepod(&mut rtsp).context("pair HomePod")?;
+            self.shared_secret = session.shared_secret.clone();
+        } else if pairing == HapPairing::TransientPassword {
+            let store = self.credential_store()?;
+            session
+                .pair_transient_password(&mut rtsp, self.password.as_deref(), store.as_ref())
+                .context("transient pair-setup")?;
             self.shared_secret = session.shared_secret.clone();
         } else {
             match self.credential_store()?.load(&dev.record.device_id) {

@@ -73,6 +73,7 @@ pub enum AuthRequirement {
     Password,
     LegacyPin,
     HapTransient,
+    HapTransientPassword,
     HapPersistent,
     UnifiedAuth,
     Unknown(AdvertisedAuth),
@@ -87,6 +88,7 @@ pub enum StreamCandidate {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HapPairing {
     Transient,
+    TransientPassword,
     Persistent,
 }
 
@@ -101,6 +103,7 @@ impl Route {
     pub fn hap_pairing(&self) -> Result<HapPairing, crate::session::SessionError> {
         match self.auth {
             AuthRequirement::HapTransient => Ok(HapPairing::Transient),
+            AuthRequirement::HapTransientPassword => Ok(HapPairing::TransientPassword),
             AuthRequirement::HapPersistent => Ok(HapPairing::Persistent),
             ref other => Err(crate::session::SessionError::UnsupportedAuthentication(other.clone())),
         }
@@ -153,11 +156,19 @@ impl TxtRecord {
     }
 
     pub fn auth_requirement(&self) -> AuthRequirement {
+        let auth = self.unprotected_auth();
+        if !self.password_required && !self.status(STATUS_PASSWORD_REQUIRED) {
+            return auth;
+        }
+        match auth {
+            AuthRequirement::HapTransient => AuthRequirement::HapTransientPassword,
+            _ => AuthRequirement::Password,
+        }
+    }
+
+    fn unprotected_auth(&self) -> AuthRequirement {
         let f = self.features;
         let pin = self.status(STATUS_PIN_REQUIRED);
-        if self.password_required || self.status(STATUS_PASSWORD_REQUIRED) {
-            return AuthRequirement::Password;
-        }
         if self.is_homepod() && !pin && (f.has(FEATURE_SUPPORTS_TRANSIENT_PAIRING) || !f.supports_hap_pairing()) {
             return AuthRequirement::HapTransient;
         }

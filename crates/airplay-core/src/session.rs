@@ -17,6 +17,12 @@ pub enum SessionError {
     Authentication,
     #[error("pairing challenge required")]
     ChallengeRequired,
+    #[error("receiver requires a password")]
+    PasswordRequired,
+    #[error("receiver asked to retry pairing later")]
+    RetryAfter { seconds: Option<u64> },
+    #[error("receiver is unavailable")]
+    ReceiverUnavailable,
     #[error("unsupported audio profile")]
     UnsupportedProfile,
     #[error("operation timed out")]
@@ -79,6 +85,7 @@ pub struct SessionOptions {
     pub volume_db: f64,
     pub cancellation: Cancellation,
     pub credentials: Option<Arc<dyn CredentialStore>>,
+    pub password: Option<String>,
 }
 
 impl Default for SessionOptions {
@@ -92,6 +99,7 @@ impl Default for SessionOptions {
             volume_db: -30.0,
             cancellation: Cancellation::default(),
             credentials: None,
+            password: None,
         }
     }
 }
@@ -139,6 +147,9 @@ impl Session {
         client.set_startup_volume(options.volume_db);
         if let Some(store) = &options.credentials {
             client.set_credential_store(store.clone());
+        }
+        if let Some(password) = &options.password {
+            client.set_password(password);
         }
         client.deadline = Some((guard.end, options.cancellation.clone()));
         let result = (|| {
@@ -434,7 +445,17 @@ fn translate(error: anyhow::Error) -> SessionError {
         return typed.clone();
     }
     if let Some(pairing) = error.downcast_ref::<crate::pairing::PairingError>() {
-        return if pairing.requires_re_pair() { SessionError::ChallengeRequired } else { SessionError::Authentication };
+        use crate::pairing::PairingError as P;
+        return match pairing {
+            P::PasswordRequired => SessionError::PasswordRequired,
+            P::Backoff { retry_after } => SessionError::RetryAfter { seconds: retry_after.map(|d| d.as_secs()) },
+            P::AttemptsExhausted => SessionError::RetryAfter { seconds: None },
+            P::Unavailable => SessionError::ReceiverUnavailable,
+            P::Cancelled => SessionError::Cancelled,
+            P::TimedOut => SessionError::Timeout,
+            p if p.requires_re_pair() => SessionError::ChallengeRequired,
+            _ => SessionError::Authentication,
+        };
     }
     if error.chain().any(|c| c.is::<StoreError>()) {
         return SessionError::LocalPermissions;
