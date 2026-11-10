@@ -341,8 +341,20 @@ impl Session {
     }
 
     pub fn stream_buffered(&mut self, feed: &BufferedFeed) -> Result<BufferedProgress, SessionError> {
+        self.stream_buffered_controlled(feed, &|| false, &mut || None)
+    }
+
+    pub fn stream_buffered_controlled(
+        &mut self,
+        feed: &BufferedFeed,
+        interrupted: &dyn Fn() -> bool,
+        volume: &mut dyn FnMut() -> Option<f64>,
+    ) -> Result<BufferedProgress, SessionError> {
         let cancellation = self.options.cancellation.clone();
-        let result = self.drive_buffered(feed, &cancellation);
+        let result = self.drive_buffered(feed, &cancellation, interrupted, volume);
+        if result.is_err() && interrupted() && !cancellation.is_cancelled() {
+            return Err(SessionError::Cancelled);
+        }
         if let Err(ref error) = result {
             feed.close(error.clone());
             if *error != SessionError::Cancelled {
@@ -353,7 +365,13 @@ impl Session {
         result
     }
 
-    fn drive_buffered(&mut self, feed: &BufferedFeed, cancellation: &Cancellation) -> Result<BufferedProgress, SessionError> {
+    fn drive_buffered(
+        &mut self,
+        feed: &BufferedFeed,
+        cancellation: &Cancellation,
+        interrupted: &dyn Fn() -> bool,
+        volume: &mut dyn FnMut() -> Option<f64>,
+    ) -> Result<BufferedProgress, SessionError> {
         if cancellation.is_cancelled() {
             return Err(SessionError::Cancelled);
         }
@@ -381,8 +399,16 @@ impl Session {
             _ => events.push(SessionEvent::Buffered(p)),
         };
         let cancelled = || cancellation.is_cancelled();
-        crate::client::stream_buffered_armed(clients, format, anchor_local, feed, &cancelled, &mut on_progress)
+        let mut control = |clients: &mut [Client]| match volume() {
+            Some(db) => clients.iter_mut().try_for_each(|c| c.tagged(|c| c.set_volume(db))),
+            None => Ok(()),
+        };
+        crate::client::stream_buffered_armed(clients, format, anchor_local, feed, &cancelled, interrupted, &mut on_progress, &mut control)
             .map_err(|e| if cancellation.is_cancelled() { SessionError::Cancelled } else { translate(e) })
+    }
+
+    pub fn startup_volume_db(&self) -> f64 {
+        self.options.volume_db
     }
 
     pub fn profile(&self) -> Option<ProfileSelection> {
@@ -443,6 +469,15 @@ impl Session {
             return Err(SessionError::InvalidInput);
         }
         connected(&mut self.clients)?.iter_mut().try_for_each(|client| client.tagged(|c| c.set_volume(db))).map_err(translate)
+    }
+
+    pub fn flush_buffered(&mut self) -> Result<(), SessionError> {
+        let result = connected(&mut self.clients)?.iter_mut().try_for_each(|c| c.tagged(Client::flush_buffered)).map_err(translate);
+        if let Err(ref error) = result {
+            self.record_failure(error);
+            let _ = self.stop();
+        }
+        result
     }
 
     fn record_failure(&mut self, error: &SessionError) {
