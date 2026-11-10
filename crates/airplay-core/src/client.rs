@@ -1686,7 +1686,7 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::write(&script, b"#!/bin/sh\necho '46504c59'")
+            std::fs::write(&script, b"#!/bin/sh\ncat >/dev/null\necho '46504c59'")
                 .expect("write fake helper");
             let mut perms = std::fs::metadata(&script).unwrap().permissions();
             perms.set_mode(0o755);
