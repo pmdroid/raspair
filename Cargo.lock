@@ -69,6 +69,7 @@ dependencies = [
  "sha2",
  "socket2 0.5.10",
  "symphonia",
+ "tempfile",
  "thiserror 1.0.69",
  "x25519-dalek",
 ]
