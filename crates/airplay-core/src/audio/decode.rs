@@ -265,6 +265,9 @@ fn collect_tags(format: &mut dyn FormatReader) -> Vec<(String, String)> {
         .chain(rev.per_track.iter().flat_map(|t| t.metadata.tags.iter()))
         .take(MAX_TAGS)
         .map(|tag| {
+            if let Some(StandardTag::TrackNumber(n)) = &tag.std {
+                return ("track".to_string(), n.to_string());
+            }
             let key = match &tag.std {
                 Some(StandardTag::TrackTitle(_)) => "title".to_string(),
                 Some(StandardTag::Artist(_)) => "artist".to_string(),

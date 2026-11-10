@@ -6,6 +6,7 @@ pub mod alac;
 pub mod convert;
 pub mod decode;
 pub mod pcm;
+pub mod queue;
 pub mod wav;
 
 pub use aac::{encode_aac_file, parse_adts_frames, AAC_LC_44100_STEREO_ASC, AAC_LC_48000_STEREO_ASC};
@@ -14,6 +15,7 @@ pub use convert::{ConversionPlan, Converter, OutputFormat, SourceFormat};
 pub use decode::{decode_audio_file, ffmpeg_available, AudioInfo, AudioReader, DecodedBlock, Samples, SeekResult};
 pub use symphonia::core::io::MediaSource;
 pub use pcm::{quantize, PcmEncoder};
+pub use queue::{scan, EntryId, Queue, QueueEntry, QueueError, ScanError, ScanOptions, ScanReport, SkipReason, Skipped, Track, TrackMetadata, MAX_QUEUE_ENTRIES};
 
 use anyhow::Result;
 
