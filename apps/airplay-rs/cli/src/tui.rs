@@ -1,7 +1,9 @@
 use crate::play::{CANCELLED, FAILED, USAGE};
 use airplay_core::audio::{scan, AudioReader, EntryId, Queue, QueueEntry, ScanOptions};
 use airplay_core::pairing::{CredentialStore, FileStore};
-use airplay_core::player::{discover_device, MIN_VOLUME_DB};
+use airplay_core::discovery::Device;
+use airplay_core::pairing::MemoryStore;
+use airplay_core::player::{connect_device, discover_device, MIN_VOLUME_DB};
 use airplay_core::protocol::HOMEPOD_PIN;
 use airplay_core::{
     Cancellation, Command, CommandError, CommandId, CommandState, Player, PlayerEvent, PlayerState, PlayerStatus, ProfileSelection, QualityReport, SessionOptions, SourceFormat, Volume,
@@ -18,11 +20,17 @@ use std::io;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+mod picker;
+use picker::{Job, Picker, Worker};
+#[cfg(test)]
+use picker::Outcome;
+
 pub const FRAME: Duration = Duration::from_millis(50);
 const SPINNER: [&str; 4] = ["◐", "◓", "◑", "◒"];
 const SEEK_STEP: Duration = Duration::from_secs(10);
 const VOLUME_STEP: f64 = 2.0;
-const KEYS: [(&str, &str); 11] = [
+const KEYS: [(&str, &str); 12] = [
+    ("d", "receivers"),
     ("Space", "play / pause"),
     ("← / →", "seek 10 s"),
     ("p / n", "previous / next"),
@@ -133,6 +141,17 @@ pub struct View {
     pub reduced_motion: bool,
     pub tick: usize,
     pub frames: u64,
+    pub picker: Picker,
+    pub jobs: Vec<Job>,
+    pub switched: bool,
+    pub play: bool,
+}
+
+type Start = Box<dyn FnMut(Option<EntryId>, Device, Vec<Device>) -> Player>;
+
+pub struct Deck {
+    pub worker: Option<Worker>,
+    pub start: Option<Start>,
 }
 
 fn meter(peak: f32) -> u8 {
@@ -167,6 +186,10 @@ impl View {
             reduced_motion,
             tick: 0,
             frames: 0,
+            picker: Picker::new(Arc::new(MemoryStore::default())),
+            jobs: Vec::new(),
+            switched: false,
+            play: false,
         }
     }
 
@@ -260,6 +283,18 @@ impl View {
     pub fn key(&mut self, key: KeyEvent) -> Option<Action> {
         match key.code {
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return Some(Action::Quit(CANCELLED)),
+            _ if self.picker.open => {
+                let before = self.picker.chosen.clone();
+                self.jobs.extend(self.picker.key(key));
+                if self.picker.chosen != before {
+                    (self.device, self.switched) = (self.picker.chosen_label(), true);
+                }
+            }
+            KeyCode::Char('d') => {
+                self.picker.open = true;
+                self.jobs.push(Job::Refresh);
+            }
+            KeyCode::Char(' ') if !matches!(self.state, Some(PlayerState::Connecting | PlayerState::Buffering | PlayerState::Playing | PlayerState::Pausing { .. } | PlayerState::Held { .. })) => self.play = true,
             KeyCode::Esc if self.help => self.help = false,
             KeyCode::Char('q') | KeyCode::Esc => return Some(Action::Quit(0)),
             KeyCode::Char('?') => self.help = !self.help,
@@ -298,7 +333,7 @@ impl View {
     fn status_line(&self) -> Line<'static> {
         let p = self.palette;
         if let Some(PlayerState::Paused { error, .. }) = &self.state {
-            return Line::from(vec![Span::styled(format!("{error}  "), p.error()), Span::styled("r retry", p.focus().add_modifier(Modifier::BOLD))]);
+            return Line::from(vec![Span::styled(format!("{}  ", self.picker.describe(error)), p.error()), Span::styled("r retry", p.focus().add_modifier(Modifier::BOLD))]);
         }
         if let Some(notice) = &self.notice {
             return Line::styled(format!("✕ {notice}"), p.error());
@@ -375,7 +410,10 @@ pub fn render(frame: &mut Frame, view: &View) {
     if view.sources.is_empty() {
         lines.push(Line::styled("no folders", p.muted()));
     }
-    lines.extend([Line::raw(""), Line::styled("Receiver", p.muted()), Line::raw(view.device.clone().unwrap_or_else(|| "none (--device)".into()))]);
+    lines.extend([Line::raw(""), Line::styled("Receiver", p.muted()), Line::raw(view.device.clone().unwrap_or_else(|| "none (d to choose)".into()))]);
+    if !view.picker.status.is_empty() && !view.picker.open {
+        lines.push(Line::styled(view.picker.status.clone(), p.warm()));
+    }
     frame.render_widget(Paragraph::new(lines).block(view.pane(Pane::Sources, "Sources")), sources);
 
     let rows: Vec<Line> = view
@@ -420,11 +458,14 @@ pub fn render(frame: &mut Frame, view: &View) {
         Some(v) => format!("{:.1} dB", v.db),
         None => "-- dB".into(),
     };
-    let hints = "  Tab focus  ? help  q quit ";
+    let hints = "  d receivers  Tab focus  ? help  q quit ";
     let [left, right] = Layout::horizontal([Constraint::Min(0), Constraint::Length(hints.len() as u16)]).areas(footer);
     frame.render_widget(Paragraph::new(format!(" {} · {volume} · {}", view.badge().0, view.device.as_deref().unwrap_or("no receiver"))), left);
     frame.render_widget(Paragraph::new(hints).style(p.muted()), right);
 
+    if view.picker.open {
+        view.picker.render(frame, p);
+    }
     if view.help {
         let height = KEYS.len() as u16 + 2;
         let popup = Rect { x: area.width.saturating_sub(36) / 2, y: area.height.saturating_sub(height) / 2, width: 36.min(area.width), height: height.min(area.height) };
@@ -436,7 +477,31 @@ pub fn render(frame: &mut Frame, view: &View) {
 
 pub type Restart<'a> = dyn FnMut(EntryId) -> Option<Player> + 'a;
 
-pub fn event_loop<B: Backend>(terminal: &mut Terminal<B>, view: &mut View, player: Option<&Player>, restart: &mut Restart, next: &mut dyn FnMut(Duration) -> io::Result<Option<Event>>) -> anyhow::Result<i32>
+fn drive(view: &mut View, deck: &mut Deck, current: Option<&Player>) -> (bool, Option<Player>) {
+    let mut dirty = false;
+    view.jobs.extend(view.picker.tick(Instant::now()));
+    let jobs = std::mem::take(&mut view.jobs);
+    if let Some(worker) = &deck.worker {
+        jobs.into_iter().for_each(|job| worker.send(job));
+        for outcome in worker.poll() {
+            if let Some(job) = view.picker.apply(outcome) {
+                worker.send(job);
+            }
+            dirty = true;
+        }
+    }
+    let (switched, play) = (std::mem::take(&mut view.switched), std::mem::take(&mut view.play));
+    let active = current.is_some_and(|p| !p.is_finished());
+    match (deck.start.as_mut(), view.picker.target()) {
+        (Some(start), Some((device, devices))) if (switched && active) || (play && !active) => {
+            current.inspect(|p| p.stop());
+            (true, Some(start(None, device, devices)))
+        }
+        _ => (dirty, None),
+    }
+}
+
+pub fn event_loop<B: Backend>(terminal: &mut Terminal<B>, view: &mut View, player: Option<&Player>, restart: &mut Restart, deck: &mut Deck, next: &mut dyn FnMut(Duration) -> io::Result<Option<Event>>) -> anyhow::Result<i32>
 where
     B::Error: std::error::Error + Send + Sync + 'static,
 {
@@ -444,6 +509,12 @@ where
     let mut retried: Option<Player> = None;
     loop {
         if last.elapsed() >= FRAME {
+            let (changed, fresh) = drive(view, deck, retried.as_ref().or(player));
+            if let Some(fresh) = fresh {
+                retried = Some(fresh);
+                view.restarted();
+            }
+            dirty |= changed;
             if let Some(player) = retried.as_ref().or(player) {
                 dirty |= view.update(player.status(), player.events());
             }
@@ -467,7 +538,11 @@ where
                         }
                     }
                     Some(Action::Retry(entry)) => {
-                        if let Some(fresh) = restart(entry) {
+                        let fresh = match (deck.start.as_mut(), view.picker.target()) {
+                            (Some(start), Some((device, devices))) => Some(start(Some(entry), device, devices)),
+                            _ => restart(entry),
+                        };
+                        if let Some(fresh) = fresh {
                             retried = Some(fresh);
                             view.restarted();
                         }
@@ -498,7 +573,7 @@ impl Drop for Restore {
     }
 }
 
-pub fn session(view: &mut View, player: Option<&Player>, restart: &mut Restart, next: &mut dyn FnMut(Duration) -> io::Result<Option<Event>>) -> i32 {
+pub fn session(view: &mut View, player: Option<&Player>, restart: &mut Restart, deck: &mut Deck, next: &mut dyn FnMut(Duration) -> io::Result<Option<Event>>) -> i32 {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         restore();
@@ -507,7 +582,7 @@ pub fn session(view: &mut View, player: Option<&Player>, restart: &mut Restart, 
     let result = terminal::enable_raw_mode().map_err(anyhow::Error::from).and_then(|()| {
         let _restore = Restore;
         execute!(io::stdout(), terminal::EnterAlternateScreen, cursor::Hide)?;
-        event_loop(&mut Terminal::new(CrosstermBackend::new(io::stdout()))?, view, player, restart, next)
+        event_loop(&mut Terminal::new(CrosstermBackend::new(io::stdout()))?, view, player, restart, deck, next)
     });
     result.unwrap_or_else(|e| {
         eprintln!("error: {e:#}");
@@ -561,23 +636,29 @@ pub fn run(input: &[String]) -> i32 {
             return (eprintln!("error: {e}"), USAGE).1;
         }
     }
-    let store = match device.as_ref().map(|_| FileStore::open_default()).transpose() {
-        Ok(store) => store.map(|s| Arc::new(s) as Arc<dyn CredentialStore>),
+    let store: Arc<dyn CredentialStore> = match FileStore::open_default() {
+        Ok(store) => Arc::new(store),
         Err(e) => return (eprintln!("error: {e}"), FAILED).1,
     };
-    let start = |queue: Queue| {
-        let options = SessionOptions { credentials: store.clone(), ..SessionOptions::default() };
-        device.clone().map(|name| Player::play(queue, discover_device(name, Duration::from_secs(5), pin.clone(), options)))
-    };
+    let options = SessionOptions { credentials: Some(store.clone()), ..SessionOptions::default() };
+    let start = |queue: Queue| device.clone().map(|name| Player::play(queue, discover_device(name, Duration::from_secs(5), pin.clone(), options.clone())));
     let player = start(queue.clone());
+    let (all, chosen_pin, chosen_options) = (queue.clone(), pin.clone(), options.clone());
+    let chosen = move |entry: Option<EntryId>, target, devices| {
+        let from = entry.map_or_else(|| all.clone(), |e| resume_at(&all, e));
+        Player::play(from, connect_device(target, devices, chosen_pin.clone(), chosen_options.clone()))
+    };
+    let mut deck = Deck { worker: Some(Worker::spawn(crate::auth::Live::new(store.clone()))), start: Some(Box::new(chosen)) };
     let sources = paths.iter().map(|p| p.display().to_string()).collect();
     let mut view = View::new(sources, device.clone(), queue.entries().to_vec(), Palette::detect(|k| std::env::var(k).ok()), reduced);
-    session(&mut view, player.as_ref(), &mut |entry| start(resume_at(&queue, entry)), &mut read_terminal)
+    view.picker = Picker::new(store);
+    session(&mut view, player.as_ref(), &mut |entry| start(resume_at(&queue, entry)), &mut deck, &mut read_terminal)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::auth::tests::apple_tv;
     use crate::play::tests::{write_wav, Fake};
     use airplay_core::audio::{Track, TrackMetadata};
     use airplay_core::{OutputProfile, PlayerError, Position, SessionError, SessionProfile};
@@ -828,7 +909,7 @@ mod tests {
         let mut view = View::new(Vec::new(), Some("test".into()), queue.entries().to_vec(), Palette::Rgb, false);
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
         let (start, mut resizes) = (Instant::now(), 0u64);
-        let code = event_loop(&mut terminal, &mut view, Some(&player), &mut |_| None, &mut |_| {
+        let code = event_loop(&mut terminal, &mut view, Some(&player), &mut |_| None, &mut Deck { worker: None, start: None }, &mut |_| {
             assert!(start.elapsed() < Duration::from_secs(20), "player worker did not finish");
             resizes += 1;
             if player.is_finished() && resizes > 1_000 {
@@ -844,14 +925,47 @@ mod tests {
     }
 
     #[test]
+    fn selecting_waits_for_play_and_switching_restarts_on_the_new_receiver() {
+        let dir = tempfile::tempdir().unwrap();
+        write_wav(&dir.path().join("a.wav"), 48_000);
+        let mut queue = Queue::new();
+        queue.append(scan(&[dir.path().to_path_buf()], &ScanOptions::default(), &Cancellation::default()).unwrap().tracks).unwrap();
+        let mut view = View::new(Vec::new(), None, queue.entries().to_vec(), Palette::Plain, true);
+        view.picker.apply(Outcome::Devices(Ok(vec![apple_tv("aa:01", "Den"), apple_tv("aa:02", "Kitchen")])));
+        let started = Arc::new(Mutex::new(Vec::new()));
+        let log = started.clone();
+        let start = move |_: Option<EntryId>, device: Device, _: Vec<Device>| {
+            log.lock().unwrap().push(device.record.device_id);
+            Player::play(queue.clone(), |_: &Cancellation| Ok(Fake { profile: None, hold: true }))
+        };
+        let mut deck = Deck { worker: None, start: Some(Box::new(start)) };
+        let mut script = vec![Some('d'), Some('\n'), None, None, Some(' '), None, None, Some('d'), Some('j'), Some('\n'), None, None, Some('q')].into_iter();
+        let (mut terminal, seen) = (Terminal::new(TestBackend::new(80, 24)).unwrap(), started.clone());
+        let code = event_loop(&mut terminal, &mut view, None, &mut |_| None, &mut deck, &mut |wait| {
+            let step = script.next().flatten();
+            if step == Some(' ') {
+                assert!(seen.lock().unwrap().is_empty(), "selecting a receiver started playback");
+            }
+            Ok(match step {
+                None => (std::thread::sleep(wait + FRAME), None).1,
+                Some('\n') => Some(Event::Key(key(KeyCode::Enter, KeyModifiers::NONE))),
+                Some(c) => Some(Event::Key(key(KeyCode::Char(c), KeyModifiers::NONE))),
+            })
+        });
+        assert_eq!(code.unwrap(), 0);
+        assert_eq!(*started.lock().unwrap(), ["aa:01", "aa:02"]);
+        assert_eq!(view.device.as_deref(), Some("Kitchen (aa:02)"));
+    }
+
+    #[test]
     #[ignore]
     fn pty_child() {
         let Ok(mode) = std::env::var("AIRPLAY_TUI_PTY") else { return };
         let mut view = View::new(Vec::new(), None, Vec::new(), Palette::Basic, true);
         std::process::exit(match mode.as_str() {
             "run" => run(&[]),
-            "error" => session(&mut view, None, &mut |_| None, &mut |_| Err(io::Error::other("simulated terminal failure"))),
-            _ => session(&mut view, None, &mut |_| None, &mut |_| panic!("simulated panic")),
+            "error" => session(&mut view, None, &mut |_| None, &mut Deck { worker: None, start: None }, &mut |_| Err(io::Error::other("simulated terminal failure"))),
+            _ => session(&mut view, None, &mut |_| None, &mut Deck { worker: None, start: None }, &mut |_| panic!("simulated panic")),
         });
     }
 

@@ -1,0 +1,30 @@
+---
+source: apps/airplay-rs/cli/src/tui/picker.rs
+expression: dialog
+---
+"                                                                                                    "
+"  ╔ Receivers ═══════════════════════════════════════════════════════════════════════════════════╗  "
+"  ║▸  Den · aa:01 · AppleTV14,1                                                                  ║  "
+"  ║    online needs pin · PCM 24/48, ALAC 24/48                                                  ║  "
+"  ║                                                                                              ║  "
+"  ║Enter the PIN for Den                                                                         ║  "
+"  ║                                                                                              ║  "
+"  ║                                                                                              ║  "
+"  ║                   ┏ PIN ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓                   ║  "
+"  ║                   ┃Enter the PIN shown on Den                            ┃                   ║  "
+"  ║                   ┃                                                      ┃                   ║  "
+"  ║                   ┃> ••••                                                ┃                   ║  "
+"  ║                   ┃                                                      ┃                   ║  "
+"  ║                   ┃Enter submit · Esc cancel · expires in 2 min          ┃                   ║  "
+"  ║                   ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛                   ║  "
+"  ║                                                                                              ║  "
+"  ║                                                                                              ║  "
+"  ║                                                                                              ║  "
+"  ║                                                                                              ║  "
+"  ║                                                                                              ║  "
+"  ║                                                                                              ║  "
+"  ║                                                                                              ║  "
+"  ╚ ↑↓ move  Enter select  p pair  f forget  r refresh  Esc close ═══════════════════════════════╝  "
+"                                                                                                    "
+
+Enter the PIN for Den
