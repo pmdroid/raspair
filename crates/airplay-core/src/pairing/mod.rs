@@ -9,8 +9,12 @@ mod fixtures;
 pub mod identity;
 pub mod session;
 pub mod srp;
+pub mod store;
 pub mod tlv;
 
 pub use channel::ChannelCipher;
-pub use identity::{identity_exists, Identity};
+pub use identity::Identity;
 pub use session::{PairTransport, PairingSession};
+pub use store::{
+    resolve_state_dir, AuthMethod, CredentialStore, FileStore, MemoryStore, PairingRecord, StoreError, Stored,
+};
