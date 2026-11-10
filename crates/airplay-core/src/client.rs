@@ -627,13 +627,8 @@ impl Client {
         }
 
         // PTP is needed for any buffered stream, not just group mode.
-        if stream_type == StreamType::Buffered && self.ptp.is_none() {
-            if let Some(v4) = dev.ipv4 {
-                match PtpClock::start(v4) {
-                    Ok(ptp) => self.ptp = Some(Arc::new(ptp)),
-                    Err(e) => log::warn!("PTP failed to start (buffered anchor likely rejected): {e}"),
-                }
-            }
+        if stream_type == StreamType::Buffered {
+            self.start_ptp(&dev)?;
         }
 
         // Decide early which audio key the group-unicast fallback will use so
@@ -727,14 +722,7 @@ impl Client {
         }
 
         if stream_type == StreamType::Buffered {
-            if self.ptp.is_none() {
-                if let Some(v4) = dev.ipv4 {
-                    match PtpClock::start(v4) {
-                        Ok(ptp) => self.ptp = Some(Arc::new(ptp)),
-                        Err(e) => log::warn!("PTP failed to start (buffered anchor likely rejected): {e}"),
-                    }
-                }
-            }
+            self.start_ptp(&dev)?;
         }
 
         // Audio encryption key: HKDF-derived from the pair-verify shared secret
@@ -883,6 +871,17 @@ impl Client {
             }
         }
 
+        Ok(())
+    }
+
+    fn start_ptp(&mut self, dev: &Device) -> Result<()> {
+        if let (None, Some(v4)) = (self.ptp.as_ref(), dev.ipv4) {
+            match PtpClock::start(v4) {
+                Ok(ptp) => self.ptp = Some(Arc::new(ptp)),
+                Err(e) if e.downcast_ref::<crate::session::SessionError>().is_some() => return Err(e),
+                Err(e) => log::warn!("PTP failed to start (buffered anchor likely rejected): {e}"),
+            }
+        }
         Ok(())
     }
 

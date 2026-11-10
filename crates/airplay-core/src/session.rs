@@ -43,6 +43,8 @@ pub enum SessionError {
     RealtimeBitDepth { requested: u16 },
     #[error("receiver has no validated {requested} Hz realtime profile; request a rate from Route::realtime_rates or allow a fallback")]
     RealtimeRate { requested: u32 },
+    #[error("binding PTP timing ports UDP 319 and 320 was denied; grant the player CAP_NET_BIND_SERVICE (setcap cap_net_bind_service=+ep) instead of running as root")]
+    PtpPermission,
 }
 
 #[derive(Clone, Default)]

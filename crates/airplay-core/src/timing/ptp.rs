@@ -7,7 +7,7 @@
 //! Sync/Follow_Up/Delay_Req exchanges, smooths the measured offset, and hands
 //! out an anchor (timeline id + seconds + fraction) at a chosen lead time.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use socket2::{Domain, Protocol, Socket, Type};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
@@ -115,17 +115,42 @@ fn listen_ptp_udp(port: u16) -> Result<UdpSocket> {
     #[cfg(unix)]
     sock.set_reuse_port(true)?;
     let addr: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port);
-    sock.bind(&addr.into())
-        .with_context(|| format!("bind PTP UDP :{port} (needs root for privileged ports)"))?;
+    sock.bind(&addr.into()).map_err(|e| bind_error(e, port))?;
     let std_sock: UdpSocket = sock.into();
     std_sock.set_read_timeout(Some(Duration::from_millis(250)))?;
     Ok(std_sock)
 }
 
+pub(crate) fn bind_error(error: std::io::Error, port: u16) -> anyhow::Error {
+    if error.kind() == std::io::ErrorKind::PermissionDenied {
+        anyhow::Error::new(crate::session::SessionError::PtpPermission)
+    } else {
+        anyhow::Error::new(error).context(format!("bind PTP UDP :{port}"))
+    }
+}
+
 impl PtpClock {
     pub fn start(peer_ip: Ipv4Addr) -> Result<Self> {
-        let event_conn = Arc::new(listen_ptp_udp(PTP_EVENT_PORT)?);
-        let general_conn = Arc::new(listen_ptp_udp(PTP_GENERAL_PORT)?);
+        Self::with_sockets(peer_ip, listen_ptp_udp(PTP_EVENT_PORT)?, listen_ptp_udp(PTP_GENERAL_PORT)?)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn locked(timeline_id: u64) -> Self {
+        let clock = Self::with_sockets(Ipv4Addr::LOCALHOST, listen_ptp_udp(0).unwrap(), listen_ptp_udp(0).unwrap()).unwrap();
+        clock.shared.gm_clock_id.store(timeline_id, Ordering::Relaxed);
+        clock.shared.offset_valid.store(true, Ordering::Relaxed);
+        clock.shared.gm_valid.store(true, Ordering::Relaxed);
+        clock
+    }
+
+    #[cfg(test)]
+    pub(crate) fn workers(&self) -> usize {
+        self.handles.lock().unwrap().len()
+    }
+
+    fn with_sockets(peer_ip: Ipv4Addr, event_conn: UdpSocket, general_conn: UdpSocket) -> Result<Self> {
+        let event_conn = Arc::new(event_conn);
+        let general_conn = Arc::new(general_conn);
 
         let shared = Arc::new(Shared {
             peer_ip,
