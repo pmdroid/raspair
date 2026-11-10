@@ -3,6 +3,7 @@ use crate::audio::convert::OutputFormat;
 use crate::pairing::{CredentialStore, StoreError};
 use crate::protocol::Route;
 use crate::stream::{BufferedCodec, BufferedFeed, BufferedProducer, BufferedProgress, RealtimeProgress, RealtimeSender};
+use crate::client::{MemberFault, Members};
 use crate::{BufferedAudioFormat, Client, Device};
 use std::net::{Shutdown, SocketAddr, TcpStream};
 use std::sync::{
@@ -45,6 +46,8 @@ pub enum SessionError {
     RealtimeRate { requested: u32 },
     #[error("binding PTP timing ports UDP 319 and 320 was denied; grant the player CAP_NET_BIND_SERVICE (setcap cap_net_bind_service=+ep) instead of running as root")]
     PtpPermission,
+    #[error("stereo member {member} failed: {error}")]
+    MemberFailed { member: String, error: Box<SessionError> },
 }
 
 #[derive(Clone, Default)]
@@ -109,16 +112,45 @@ impl Default for SessionOptions {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionEvent {
     Connected,
+    GroupReady { group: String, left: String, right: String },
+    MemberFailed { member: String, error: SessionError },
     Profile(ProfileSelection),
     Buffered(BufferedProgress),
     Stopped,
     Failed(SessionError),
 }
 
+#[derive(Debug, Clone)]
+pub struct StereoPair {
+    pub group: String,
+    pub left: Device,
+    pub right: Device,
+}
+
+impl StereoPair {
+    pub fn resolve(devices: &[Device], selected: &Device) -> Option<Self> {
+        let group = selected.tight_sync_id();
+        if group.is_empty() || selected.record.device_id.is_empty() {
+            return None;
+        }
+        let mut mates = devices
+            .iter()
+            .filter(|d| d.tight_sync_id() == group && !d.record.device_id.is_empty() && d.record.device_id != selected.record.device_id);
+        let mate = mates.next()?;
+        if mates.any(|d| d.record.device_id != mate.record.device_id) {
+            return None;
+        }
+        let (left, right) = if selected.record.device_id < mate.record.device_id { (selected, mate) } else { (mate, selected) };
+        Some(Self { group: group.to_string(), left: left.clone(), right: right.clone() })
+    }
+}
+
+type Sockets = Arc<Mutex<Vec<TcpStream>>>;
+
 pub struct Session {
-    client: Option<Client>,
+    clients: Vec<Client>,
     options: SessionOptions,
-    socket: Arc<Mutex<Option<TcpStream>>>,
+    socket: Sockets,
     events: Vec<SessionEvent>,
     selection: Option<ProfileSelection>,
     realtime: Option<RealtimeSender>,
@@ -127,6 +159,46 @@ pub struct Session {
 
 impl Session {
     pub fn connect(device: &Device, pin: &str, options: SessionOptions) -> Result<Self, SessionError> {
+        Self::connect_member(device, pin, options, None)
+    }
+
+    pub fn connect_pair(pair: &StereoPair, pin: &str, options: SessionOptions) -> Result<Self, SessionError> {
+        let route = pair.right.route();
+        route.hap_pairing().and_then(|_| profile::preflight(&route, &options.profile, &options.fallback)).map_err(|e| member_failed(&pair.right, e))?;
+        Self::assemble_pair(pair, options, |device, options, leader| Self::connect_member(device, pin, options.clone(), leader))
+    }
+
+    fn assemble_pair(
+        pair: &StereoPair,
+        options: SessionOptions,
+        mut open: impl FnMut(&Device, &SessionOptions, Option<&Client>) -> Result<Self, SessionError>,
+    ) -> Result<Self, SessionError> {
+        let mut session = open(&pair.left, &options, None).map_err(|e| member_failed(&pair.left, e))?;
+        session.clients[0].member = Some(pair.left.record.device_id.clone());
+        let follower = SessionOptions { profile: session.options.profile.clone(), fallback: FallbackPolicy::Forbid, ..options };
+        let mut right = match open(&pair.right, &follower, session.clients.first()) {
+            Ok(right) => right,
+            Err(error) => {
+                let _ = session.stop();
+                return Err(member_failed(&pair.right, error));
+            }
+        };
+        right.clients[0].member = Some(pair.right.record.device_id.clone());
+        session.clients.append(&mut right.clients);
+        session.socket.lock().unwrap().append(&mut right.socket.lock().unwrap());
+        session.events = vec![
+            SessionEvent::Connected,
+            SessionEvent::GroupReady {
+                group: pair.group.clone(),
+                left: pair.left.record.device_id.clone(),
+                right: pair.right.record.device_id.clone(),
+            },
+        ];
+        session.events.extend(session.selection.map(SessionEvent::Profile));
+        Ok(session)
+    }
+
+    fn connect_member(device: &Device, pin: &str, options: SessionOptions, leader: Option<&Client>) -> Result<Self, SessionError> {
         if Instant::now().checked_add(options.connection_timeout).is_none()
             || Instant::now().checked_add(options.shutdown_timeout).is_none()
             || options.connection_timeout.is_zero()
@@ -143,7 +215,7 @@ impl Session {
         let mut options = options;
         let ip = device.ip().ok_or(SessionError::InvalidInput)?;
         let addr = SocketAddr::new(ip.parse().map_err(|_| SessionError::InvalidInput)?, device.port);
-        let socket = Arc::new(Mutex::new(None));
+        let socket = Sockets::default();
         let guard = Deadline::new(socket.clone(), options.connection_timeout, options.cancellation.clone());
         let mut client = Client::new();
         client.set_startup_volume(options.volume_db);
@@ -152,6 +224,12 @@ impl Session {
         }
         if let Some(password) = &options.password {
             client.set_password(password);
+        }
+        if let Some(leader) = leader {
+            if let Some(ptp) = leader.ptp_clock() {
+                client.set_ptp_clock(ptp);
+            }
+            client.set_group_uuid(leader.group_uuid());
         }
         client.deadline = Some((guard.end, options.cancellation.clone()));
         let result = (|| {
@@ -165,7 +243,7 @@ impl Session {
                     Err(e) => return Err(translate(e.into())),
                 }
             };
-            *socket.lock().unwrap() = Some(stream.try_clone().map_err(|e| translate(e.into()))?);
+            socket.lock().unwrap().push(stream.try_clone().map_err(|e| translate(e.into()))?);
             guard.check()?;
             let rtsp = crate::rtsp::Client::from_stream(&ip, device.port, stream).map_err(translate)?;
             client.connect_transport(device, pin, rtsp).map_err(translate)?;
@@ -179,7 +257,7 @@ impl Session {
         let (effective, selection) = match result {
             Ok(negotiated) => negotiated,
             Err(error) => {
-                if let Some(s) = socket.lock().unwrap().take() {
+                for s in socket.lock().unwrap().drain(..) {
                     let _ = s.shutdown(Shutdown::Both);
                 }
                 let _ = client.stop();
@@ -187,7 +265,7 @@ impl Session {
             }
         };
         client.deadline = None;
-        if let Some(s) = socket.lock().unwrap().as_ref() {
+        for s in socket.lock().unwrap().iter() {
             s.set_read_timeout(Some(options.shutdown_timeout)).map_err(|e| translate(e.into()))?;
             s.set_write_timeout(Some(options.shutdown_timeout)).map_err(|e| translate(e.into()))?;
         }
@@ -199,7 +277,7 @@ impl Session {
         };
         options.profile = effective;
         let events = vec![SessionEvent::Connected, SessionEvent::Profile(selection)];
-        Ok(Self { client: Some(client), options, socket, events, selection: Some(selection), realtime, armed: false })
+        Ok(Self { clients: vec![client], options, socket, events, selection: Some(selection), realtime, armed: false })
     }
 
     pub fn realtime_output(&self) -> Option<OutputFormat> {
@@ -228,23 +306,23 @@ impl Session {
             return Err(SessionError::Cancelled);
         }
         let sender = self.realtime.as_mut().ok_or(SessionError::UnsupportedProfile)?;
-        let client = self.client.as_mut().ok_or(SessionError::ConnectionLost)?;
+        let mut members = Members(connected(&mut self.clients)?);
         let cancelled = || cancellation.is_cancelled();
         let mut result = Ok(());
         if !self.armed {
-            result = crate::client::begin_live_realtime_synchronized(std::slice::from_mut(client));
+            result = crate::client::begin_live_realtime_synchronized(members.0);
             self.armed = result.is_ok();
         }
         let result = result
             .and_then(|()| match samples {
-                Some(samples) => sender.push(client, samples, &cancelled),
-                None => sender.finish(client, &cancelled),
+                Some(samples) => sender.push(&mut members, samples, &cancelled),
+                None => sender.finish(&mut members, &cancelled),
             })
             .map_err(translate);
         if let Err(ref error) = result {
             if *error != SessionError::InvalidInput {
                 if *error != SessionError::Cancelled {
-                    self.events.push(SessionEvent::Failed(error.clone()));
+                    self.record_failure(error);
                 }
                 let _ = self.stop();
             }
@@ -268,7 +346,7 @@ impl Session {
         if let Err(ref error) = result {
             feed.close(error.clone());
             if *error != SessionError::Cancelled {
-                self.events.push(SessionEvent::Failed(error.clone()));
+                self.record_failure(error);
             }
             let _ = self.stop();
         }
@@ -282,14 +360,18 @@ impl Session {
         let SessionProfile::Buffered(format) = &self.options.profile else {
             return Err(SessionError::UnsupportedProfile);
         };
-        let client = self.client.as_mut().ok_or(SessionError::ConnectionLost)?;
-        if !client.has_buffered() {
+        let clients = connected(&mut self.clients)?;
+        if !clients.iter().all(Client::has_buffered) {
             return Err(SessionError::UnsupportedProfile);
         }
         let guard = Deadline::new(self.socket.clone(), self.options.connection_timeout, cancellation.clone());
-        client.deadline = Some((guard.end, cancellation.clone()));
-        let armed = crate::client::arm_buffered_synchronized(std::slice::from_mut(client));
-        client.deadline = None;
+        for client in clients.iter_mut() {
+            client.deadline = Some((guard.end, cancellation.clone()));
+        }
+        let armed = crate::client::arm_buffered_synchronized(clients);
+        for client in clients.iter_mut() {
+            client.deadline = None;
+        }
         let armed = guard.check().and(armed.map_err(translate));
         drop(guard);
         let anchor_local = armed?;
@@ -299,7 +381,7 @@ impl Session {
             _ => events.push(SessionEvent::Buffered(p)),
         };
         let cancelled = || cancellation.is_cancelled();
-        crate::client::stream_buffered_armed(std::slice::from_mut(client), format, anchor_local, feed, &cancelled, &mut on_progress)
+        crate::client::stream_buffered_armed(clients, format, anchor_local, feed, &cancelled, &mut on_progress)
             .map_err(|e| if cancellation.is_cancelled() { SessionError::Cancelled } else { translate(e) })
     }
 
@@ -319,36 +401,55 @@ impl Session {
         if payload.is_empty() {
             return Err(SessionError::InvalidInput);
         }
-        let client = self.client.as_mut().ok_or(SessionError::ConnectionLost)?;
-        let result = match self.options.profile {
-            SessionProfile::Realtime { .. } => client.write_realtime_frame(payload, marker),
-            SessionProfile::Buffered(_) => client.write_buffered_frame(payload),
-        }
-        .map_err(translate);
+        let realtime = matches!(self.options.profile, SessionProfile::Realtime { .. });
+        let result = connected(&mut self.clients)?
+            .iter_mut()
+            .try_for_each(|client| {
+                client.tagged(|c| if realtime { c.write_realtime_frame(payload, marker) } else { c.write_buffered_frame(payload) })
+            })
+            .map_err(translate);
         if let Err(ref e) = result {
-            self.events.push(SessionEvent::Failed(e.clone()));
+            self.record_failure(e);
+            if self.clients.len() > 1 {
+                let _ = self.stop();
+            }
         }
         result
     }
 
     pub fn begin_playback(&mut self) -> Result<(), SessionError> {
-        let client = self.client.as_mut().ok_or(SessionError::ConnectionLost)?;
-        if self.realtime.is_some() && !self.armed {
-            crate::client::begin_live_realtime_synchronized(std::slice::from_mut(client)).map_err(translate)?;
-            self.armed = true;
-            Ok(())
-        } else if client.has_buffered() {
-            client.begin_buffered_playback().map_err(translate)
-        } else {
-            Ok(())
+        let result = match &mut self.clients[..] {
+            [] => Err(SessionError::ConnectionLost),
+            clients if self.realtime.is_some() && !self.armed => {
+                let armed = crate::client::begin_live_realtime_synchronized(clients).map_err(translate);
+                self.armed = armed.is_ok();
+                armed
+            }
+            [client] if client.has_buffered() => client.begin_buffered_playback().map_err(translate),
+            clients if clients.iter().all(Client::has_buffered) => {
+                crate::client::begin_live_buffered_synchronized(clients).map_err(translate)
+            }
+            _ => Ok(()),
+        };
+        if let (Err(error), true) = (&result, self.clients.len() > 1) {
+            self.record_failure(&error.clone());
+            let _ = self.stop();
         }
+        result
     }
 
     pub fn set_volume(&mut self, db: f64) -> Result<(), SessionError> {
         if !db.is_finite() {
             return Err(SessionError::InvalidInput);
         }
-        self.client.as_mut().ok_or(SessionError::ConnectionLost)?.set_volume(db).map_err(translate)
+        connected(&mut self.clients)?.iter_mut().try_for_each(|client| client.tagged(|c| c.set_volume(db))).map_err(translate)
+    }
+
+    fn record_failure(&mut self, error: &SessionError) {
+        if let SessionError::MemberFailed { member, error } = error {
+            self.events.push(SessionEvent::MemberFailed { member: member.clone(), error: (**error).clone() });
+        }
+        self.events.push(SessionEvent::Failed(error.clone()));
     }
 
     pub fn cancel(&mut self) -> Result<(), SessionError> {
@@ -357,12 +458,14 @@ impl Session {
     }
 
     pub fn stop(&mut self) -> Result<(), SessionError> {
-        let Some(mut client) = self.client.take() else {
+        if self.clients.is_empty() {
             return Ok(());
-        };
+        }
+        let mut clients = std::mem::take(&mut self.clients);
         let guard = Deadline::new(self.socket.clone(), self.options.shutdown_timeout, Cancellation::default());
-        let result = client.stop().map_err(translate);
-        if let Some(s) = self.socket.lock().unwrap().take() {
+        let result = clients.iter_mut().map(|client| client.stop().map_err(translate)).fold(Ok(()), Result::and);
+        drop(clients);
+        for s in self.socket.lock().unwrap().drain(..) {
             let _ = s.shutdown(Shutdown::Both);
         }
         let result = guard.check().and(result);
@@ -385,7 +488,7 @@ struct Deadline {
 }
 
 impl Deadline {
-    fn new(socket: Arc<Mutex<Option<TcpStream>>>, timeout: Duration, cancellation: Cancellation) -> Self {
+    fn new(socket: Sockets, timeout: Duration, cancellation: Cancellation) -> Self {
         let end = Instant::now() + timeout;
         let done = Arc::new(AtomicBool::new(false));
         let stop = done.clone();
@@ -393,7 +496,7 @@ impl Deadline {
         let worker = std::thread::spawn(move || {
             while !stop.load(Ordering::SeqCst) {
                 if cancel.is_cancelled() || Instant::now() >= end {
-                    if let Some(s) = socket.lock().unwrap().as_ref() {
+                    for s in socket.lock().unwrap().iter() {
                         let _ = s.shutdown(Shutdown::Both);
                     }
                     break;
@@ -442,7 +545,28 @@ impl ProfileTarget for ClientTarget<'_> {
     }
 }
 
+fn connected(clients: &mut [Client]) -> Result<&mut [Client], SessionError> {
+    if clients.is_empty() {
+        return Err(SessionError::ConnectionLost);
+    }
+    Ok(clients)
+}
+
+fn member_failed(device: &Device, error: SessionError) -> SessionError {
+    match error {
+        SessionError::MemberFailed { .. } => error,
+        error => SessionError::MemberFailed { member: device.record.device_id.clone(), error: Box::new(error) },
+    }
+}
+
 fn translate(error: anyhow::Error) -> SessionError {
+    match error.downcast_ref::<MemberFault>() {
+        Some(MemberFault(member)) => SessionError::MemberFailed { member: member.clone(), error: Box::new(classify(error)) },
+        None => classify(error),
+    }
+}
+
+fn classify(error: anyhow::Error) -> SessionError {
     if let Some(typed) = error.downcast_ref::<SessionError>() {
         return typed.clone();
     }
@@ -485,9 +609,9 @@ mod tests {
         let (mut receiver, _) = listener.accept().unwrap();
         receiver.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
         let mut session = Session {
-            client: Some(Client::new()),
+            clients: vec![Client::new()],
             options: SessionOptions::default(),
-            socket: Arc::new(Mutex::new(Some(stream))),
+            socket: Arc::new(Mutex::new(vec![stream])),
             events: Vec::new(),
             selection: None,
             realtime: None,
@@ -511,7 +635,7 @@ mod tests {
             assert!(session.buffered_source().is_ok());
         }
         let (producer, feed) = session.buffered_source().unwrap();
-        session.client = Some(Client::new());
+        session.clients = vec![Client::new()];
         assert_eq!(session.stream_buffered(&feed), Err(SessionError::UnsupportedProfile));
         assert_eq!(producer.push(&[0.0; 2]), Err(SessionError::UnsupportedProfile));
         assert_eq!(session.events().collect::<Vec<_>>(), vec![SessionEvent::Failed(SessionError::UnsupportedProfile), SessionEvent::Stopped]);
@@ -528,9 +652,9 @@ mod tests {
         client.attach_realtime(stream);
         let options = SessionOptions { profile: SessionProfile::Realtime { sample_rate: 48000 }, ..Default::default() };
         let session = Session {
-            client: Some(client),
+            clients: vec![client],
             options,
-            socket: Arc::new(Mutex::new(None)),
+            socket: Sockets::default(),
             events: Vec::new(),
             selection: None,
             realtime: Some(RealtimeSender::new(48000, latency)),
@@ -570,5 +694,174 @@ mod tests {
         let events: Vec<_> = session.events().collect();
         assert_eq!(events, vec![SessionEvent::Failed(SessionError::ConnectionLost), SessionEvent::Stopped]);
         assert_eq!(session.write_realtime_samples(&[0.0; 2]), Err(SessionError::ConnectionLost));
+    }
+
+    const KEY: [u8; 32] = [7; 32];
+
+    struct FakeReceiver {
+        requests: std::thread::JoinHandle<Vec<(String, Vec<u8>)>>,
+        data: std::net::TcpListener,
+    }
+
+    fn device(id: &str) -> Device {
+        let record = crate::protocol::TxtRecord { device_id: id.into(), tight_sync_id: "pair".into(), ..Default::default() };
+        Device { name: id.into(), host: id.into(), port: 7000, ipv4: None, ipv6: None, record, last_seen: 0 }
+    }
+
+    fn member(ptp: Arc<crate::PtpClock>) -> (Client, FakeReceiver) {
+        use std::io::{BufRead, Write};
+        let control = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let data = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let stream = TcpStream::connect(control.local_addr().unwrap()).unwrap();
+        let (socket, _) = control.accept().unwrap();
+        let requests = std::thread::spawn(move || {
+            let mut writer = socket.try_clone().unwrap();
+            let mut reader = std::io::BufReader::new(socket);
+            let mut seen = Vec::new();
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                    return seen;
+                }
+                let (mut cseq, mut len) = (String::new(), 0);
+                let mut header = String::new();
+                while reader.read_line(&mut header).unwrap() > 2 {
+                    match header.split_once(':').map(|(k, v)| (k.to_ascii_lowercase(), v.trim().to_string())) {
+                        Some((k, v)) if k == "cseq" => cseq = v,
+                        Some((k, v)) if k == "content-length" => len = v.parse().unwrap(),
+                        _ => {}
+                    }
+                    header.clear();
+                }
+                let mut body = vec![0; len];
+                std::io::Read::read_exact(&mut reader, &mut body).unwrap();
+                seen.push((line.split(' ').next().unwrap().to_string(), body));
+                let _ = writer.write_all(format!("RTSP/1.0 200 OK\r\nCSeq: {cseq}\r\nContent-Length: 0\r\n\r\n").as_bytes());
+            }
+        });
+        let rtsp = crate::rtsp::Client::from_stream("127.0.0.1", 7000, stream).unwrap();
+        let port = data.local_addr().unwrap().port() as i64;
+        let mut buffered = crate::stream::BufferedStream::new(&KEY, "127.0.0.1", port, 0, 48000, 352, crate::stream::buffered::SSRC_BUFFERED_PCM48000_24_STEREO);
+        buffered.start().unwrap();
+        let mut client = Client::new();
+        client.attach_buffered(rtsp, buffered, ptp);
+        (client, FakeReceiver { requests, data })
+    }
+
+    fn read_packet(sock: &mut TcpStream) -> (u32, u32, Vec<u8>) {
+        use chacha20poly1305::aead::{Aead, KeyInit, Payload};
+        use std::io::Read;
+        let mut len = [0u8; 2];
+        sock.read_exact(&mut len).unwrap();
+        let mut packet = vec![0u8; u16::from_be_bytes(len) as usize - 2];
+        sock.read_exact(&mut packet).unwrap();
+        let (ct, tail) = packet[12..].split_at(packet.len() - 20);
+        let mut nonce = [0u8; 12];
+        nonce[4..].copy_from_slice(tail);
+        let cipher = chacha20poly1305::ChaCha20Poly1305::new(chacha20poly1305::Key::from_slice(&KEY));
+        let plain = cipher.decrypt(chacha20poly1305::Nonce::from_slice(&nonce), Payload { msg: ct, aad: &packet[4..12] }).unwrap();
+        (u32::from_be_bytes([0, packet[1], packet[2], packet[3]]), u32::from_be_bytes(packet[4..8].try_into().unwrap()), plain)
+    }
+
+    fn connect_fake_pair(
+        clock: &Arc<crate::PtpClock>,
+        right: impl FnOnce() -> Result<(), SessionError>,
+    ) -> (Result<Session, SessionError>, Vec<FakeReceiver>) {
+        let pair = StereoPair::resolve(&[device("bb"), device("aa")], &device("bb")).unwrap();
+        let mut fakes = Vec::new();
+        let mut right = Some(right);
+        let session = Session::assemble_pair(&pair, SessionOptions::default(), |device, options, leader| {
+            if device.record.device_id == "bb" {
+                (right.take().unwrap())()?;
+            }
+            let (client, fake) = member(leader.and_then(Client::ptp_clock).unwrap_or_else(|| clock.clone()));
+            fakes.push(fake);
+            let output = crate::profile::OutputProfile::of(&options.profile)?;
+            let selection = Some(ProfileSelection { requested: output, effective: output, fallback: None });
+            Ok(Session { clients: vec![client], options: options.clone(), socket: Sockets::default(), events: Vec::new(), selection, realtime: None, armed: false })
+        });
+        (session, fakes)
+    }
+
+    fn methods(requests: &[(String, Vec<u8>)]) -> Vec<&str> {
+        requests.iter().map(|(m, _)| m.as_str()).collect()
+    }
+
+    #[test]
+    fn stereo_pair_resolution_is_stable_and_requires_exactly_one_mate() {
+        let devices = [device("bb"), device("aa"), device("bb")];
+        for selected in [&devices[0], &devices[1]] {
+            let pair = StereoPair::resolve(&devices, selected).unwrap();
+            assert_eq!((pair.group.as_str(), pair.left.record.device_id.as_str(), pair.right.record.device_id.as_str()), ("pair", "aa", "bb"));
+        }
+        assert!(StereoPair::resolve(&devices[..1], &devices[0]).is_none());
+        assert!(StereoPair::resolve(&[device("aa"), device("bb"), device("cc")], &devices[1]).is_none());
+        let mut single = device("aa");
+        single.record.tight_sync_id.clear();
+        assert!(StereoPair::resolve(&devices, &single).is_none());
+    }
+
+    #[test]
+    fn pair_members_share_one_anchor_and_identical_stereo_frames_and_stop_together() {
+        for fail_right in [false, true] {
+            let clock = Arc::new(crate::PtpClock::locked(0xfeed));
+            let (session, fakes) = connect_fake_pair(&clock, || Ok(()));
+            let mut session = session.unwrap();
+            let ready = SessionEvent::GroupReady { group: "pair".into(), left: "aa".into(), right: "bb".into() };
+            let events: Vec<_> = session.events().collect();
+            assert!(matches!(&events[..], [SessionEvent::Connected, r, SessionEvent::Profile(_)] if *r == ready));
+            session.begin_playback().unwrap();
+            let block: Vec<f32> = (0..352).flat_map(|i| [i as f32 / 1000.0, -(i as f32) / 1000.0]).collect();
+            let payload = crate::stream::BufferedCodec::of(&BufferedAudioFormat::pcm_48000_24_stereo(true)).unwrap().encode(&block, 352);
+            assert_eq!(payload.len(), 352 * 2 * 3);
+            session.write_frame(&payload, false).unwrap();
+            let mut data: Vec<_> = fakes.iter().map(|f| f.data.accept().unwrap().0).collect();
+            let packets: Vec<_> = data.iter_mut().map(read_packet).collect();
+            assert_eq!(packets[0], packets[1]);
+            assert_eq!(packets[0].2, payload);
+            if fail_right {
+                drop(data.pop());
+                let error = (0..200).find_map(|_| session.write_frame(&payload, false).err()).unwrap();
+                assert!(matches!(&error, SessionError::MemberFailed { member, .. } if member == "bb"));
+                let events: Vec<_> = session.events().collect();
+                assert!(matches!(&events[0], SessionEvent::MemberFailed { member, .. } if member == "bb"));
+                assert_eq!(events[1..], [SessionEvent::Failed(error), SessionEvent::Stopped]);
+            } else {
+                session.stop().unwrap();
+            }
+            let seen: Vec<_> = fakes.into_iter().map(|f| f.requests.join().unwrap()).collect();
+            for requests in &seen {
+                assert_eq!(methods(requests), ["RECORD", "FLUSHBUFFERED", "SETRATEANCHORTIME", "TEARDOWN"]);
+            }
+            assert_eq!(seen[0][..3], seen[1][..3]);
+            let anchor = plist::Value::from_reader(std::io::Cursor::new(&seen[0][2].1)).unwrap();
+            assert_eq!(anchor.as_dictionary().unwrap()["networkTimeTimelineID"].as_unsigned_integer(), Some(0xfeed));
+            drop(session);
+            assert_eq!((Arc::strong_count(&clock), clock.workers()), (1, 0));
+        }
+    }
+
+    #[test]
+    fn delayed_second_member_failure_releases_the_first_before_any_frame() {
+        let clock = Arc::new(crate::PtpClock::locked(1));
+        let (session, fakes) = connect_fake_pair(&clock, || {
+            std::thread::sleep(Duration::from_millis(50));
+            Err(SessionError::Timeout)
+        });
+        assert_eq!(session.err(), Some(SessionError::MemberFailed { member: "bb".into(), error: Box::new(SessionError::Timeout) }));
+        let [left] = <[FakeReceiver; 1]>::try_from(fakes).ok().unwrap();
+        let (mut data, _) = left.data.accept().unwrap();
+        assert_eq!(std::io::Read::read(&mut data, &mut [0; 1]).unwrap(), 0);
+        assert_eq!(methods(&left.requests.join().unwrap()), ["TEARDOWN"]);
+        assert_eq!((Arc::strong_count(&clock), clock.workers()), (1, 0));
+    }
+
+    #[test]
+    fn ptp_permission_errors_name_the_ports_and_capability() {
+        let denied = crate::timing::ptp::bind_error(std::io::ErrorKind::PermissionDenied.into(), 319);
+        let error = translate(denied);
+        assert_eq!(error, SessionError::PtpPermission);
+        let message = error.to_string();
+        assert!(message.contains("UDP 319 and 320") && message.contains("CAP_NET_BIND_SERVICE"));
     }
 }
