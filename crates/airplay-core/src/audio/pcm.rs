@@ -4,6 +4,11 @@
 
 pub const FRAME_SIZE: usize = 352;
 
+pub fn quantize(sample: f32, bits: u32) -> i32 {
+    let scale = (1u64 << (bits - 1)) as f64;
+    (sample as f64 * scale).round().clamp(-scale, scale - 1.0) as i32
+}
+
 pub struct PcmEncoder {
     pub sample_rate: i32,
     pub channels: i32,
@@ -29,18 +34,13 @@ impl PcmEncoder {
     pub fn encode(&self, samples: &[f32]) -> Vec<u8> {
         let mut out = Vec::with_capacity(samples.len() * (self.bits_per_sample as usize / 8));
         for &s in samples {
-            let s = s.clamp(-1.0, 1.0);
             if self.bits_per_sample == 16 {
-                let val = (s * 32767.0) as i16;
+                let val = quantize(s, 16) as i16;
                 out.extend_from_slice(&val.to_be_bytes());
                 continue;
             }
             // 24-bit
-            let mut val = (s * 8_388_607.0) as i32;
-            if s <= -1.0 {
-                val = -8_388_608;
-            }
-            let b = val as u32;
+            let b = quantize(s, 24) as u32;
             if self.little_endian {
                 out.push(b as u8);
                 out.push((b >> 8) as u8);
