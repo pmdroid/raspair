@@ -1,3 +1,4 @@
+use super::challenge::{PinPairingError, PinPairings, PinSource, DEFAULT_CHALLENGE_EXPIRY};
 use super::crypto::{chacha20poly1305_decrypt, chacha20poly1305_encrypt, hkdf_expand, nonce_from_string};
 use super::identity::{self, Identity};
 use super::store::{CredentialStore, FileStore, MemoryStore, PairingRecord, Stored};
@@ -8,6 +9,8 @@ use anyhow::{anyhow, bail, Result};
 use ed25519_dalek::{Signer, SigningKey};
 use num_bigint::BigUint;
 use sha2::{Digest, Sha512};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use x25519_dalek::{x25519, X25519_BASEPOINT_BYTES};
 
 const SYNTHETIC_PIN: &str = "0000";
@@ -47,6 +50,7 @@ struct SyntheticReceiver {
     controller_curve: Vec<u8>,
     verify_key: Vec<u8>,
     tamper_verify_sig: bool,
+    fail_setup: Option<(u8, u8)>,
 }
 
 impl SyntheticReceiver {
@@ -73,6 +77,7 @@ impl SyntheticReceiver {
             controller_curve: Vec::new(),
             verify_key: Vec::new(),
             tamper_verify_sig: false,
+            fail_setup: None,
         }
     }
 
@@ -201,6 +206,14 @@ impl PairTransport for SyntheticReceiver {
             flags: first(tlv::TLV_FLAGS),
             fields: items.iter().map(|i| i.typ).collect(),
         });
+        if let (Some((state, code)), "/pair-setup") = (self.fail_setup, path) {
+            if first(tlv::TLV_STATE) == Some(state) {
+                return Ok(tlv::encode(&[
+                    TlvItem::new(tlv::TLV_STATE, vec![state + 1]),
+                    TlvItem::new(tlv::TLV_ERROR, vec![code]),
+                ]));
+            }
+        }
         match (path, first(tlv::TLV_STATE)) {
             ("/pair-pin-start", None) => Ok(Vec::new()),
             ("/pair-setup", Some(0x01)) => Ok(self.setup_m2()),
@@ -210,6 +223,42 @@ impl PairTransport for SyntheticReceiver {
             ("/pair-verify", Some(0x03)) => self.verify_m4(&items),
             _ => bail!("synthetic receiver rejects {path}"),
         }
+    }
+}
+
+#[derive(Clone)]
+struct SharedReceiver(Arc<Mutex<SyntheticReceiver>>);
+
+impl SharedReceiver {
+    fn new(receiver: SyntheticReceiver) -> Self {
+        Self(Arc::new(Mutex::new(receiver)))
+    }
+
+    fn boxed(&self) -> Box<dyn PairTransport + Send> {
+        Box::new(self.clone())
+    }
+
+    fn paths(&self) -> Vec<(String, Option<u8>)> {
+        self.0.lock().unwrap().paths().into_iter().map(|(p, s)| (p.to_string(), s)).collect()
+    }
+}
+
+impl PairTransport for SharedReceiver {
+    fn post(&mut self, path: &str, headers: &[(String, String)], body: &[u8]) -> Result<Vec<u8>> {
+        self.0.lock().unwrap().post(path, headers, body)
+    }
+}
+
+fn steps(list: &[(&str, Option<u8>)]) -> Vec<(String, Option<u8>)> {
+    list.iter().map(|(p, s)| (p.to_string(), *s)).collect()
+}
+
+const STARTED: &[(&str, Option<u8>)] = &[("/pair-pin-start", None), ("/pair-setup", Some(0x01))];
+
+fn saved(store: &MemoryStore) -> Option<([u8; 32], [u8; 32])> {
+    match store.load(SYNTHETIC_RECEIVER_ID).unwrap() {
+        Stored::Paired(r) => Some((r.controller_key.seed(), r.accessory_public_key)),
+        _ => None,
     }
 }
 
@@ -457,4 +506,122 @@ fn reconnect_fails_when_receiver_does_not_know_controller() {
     let err = reconnect(&mut receiver, &record).unwrap_err();
     assert!(format!("{err:#}").contains("pair-verify M4 error: code=2"));
     assert!(err.downcast_ref::<PairingError>().unwrap().requires_re_pair());
+}
+
+#[test]
+fn pin_challenge_starts_before_prompt_and_answer_resumes_its_own_session() {
+    let store = Arc::new(MemoryStore::default());
+    let pairings = PinPairings::new(store.clone());
+    let first = SharedReceiver::new(SyntheticReceiver::new(SYNTHETIC_PIN));
+    let other = SharedReceiver::new(SyntheticReceiver::new("4321"));
+    let challenge = pairings.begin(SYNTHETIC_RECEIVER_ID, PinSource::OnScreen, first.boxed()).unwrap();
+    assert_eq!(first.paths(), steps(STARTED));
+    assert_eq!(challenge.receiver_id, SYNTHETIC_RECEIVER_ID);
+    assert_eq!(challenge.source, PinSource::OnScreen);
+    let left = challenge.expires_at - Instant::now();
+    assert!(left <= DEFAULT_CHALLENGE_EXPIRY && left > DEFAULT_CHALLENGE_EXPIRY - Duration::from_secs(5));
+    let second = pairings.begin("fixture-other", PinSource::Static, other.boxed()).unwrap();
+    assert_ne!(challenge.id, second.id);
+
+    pairings.respond(&challenge.id, SYNTHETIC_PIN).unwrap();
+    let mut expected = STARTED.to_vec();
+    expected.extend([("/pair-setup", Some(0x03)), ("/pair-setup", Some(0x05))]);
+    assert_eq!(first.paths(), steps(&expected));
+    assert_eq!(other.paths(), steps(STARTED));
+    assert_eq!(saved(&store).unwrap().1.to_vec(), first.0.lock().unwrap().accessory_ltpk());
+    assert!(matches!(store.load("fixture-other").unwrap(), Stored::Missing));
+    pairings.respond(&second.id, "4321").unwrap();
+    assert!(matches!(store.load("fixture-other").unwrap(), Stored::Paired(_)));
+}
+
+#[test]
+fn late_and_duplicate_answers_cannot_finish_other_challenges_or_replace_trust() {
+    let store = Arc::new(MemoryStore::default());
+    let pairings = PinPairings::new(store.clone());
+    let receiver = SharedReceiver::new(SyntheticReceiver::new(SYNTHETIC_PIN));
+    let stale = pairings.begin(SYNTHETIC_RECEIVER_ID, PinSource::OnScreen, receiver.boxed()).unwrap();
+    let fresh = pairings.begin(SYNTHETIC_RECEIVER_ID, PinSource::OnScreen, receiver.boxed()).unwrap();
+    assert_eq!(pairings.respond(&stale.id, SYNTHETIC_PIN), Err(PinPairingError::Cancelled));
+    assert_eq!(receiver.paths(), steps(&[STARTED, STARTED].concat()));
+    assert!(saved(&store).is_none());
+
+    pairings.respond(&fresh.id, SYNTHETIC_PIN).unwrap();
+    let trusted = saved(&store).unwrap();
+    let exchanges = receiver.paths().len();
+    assert_eq!(pairings.respond(&fresh.id, SYNTHETIC_PIN), Err(PinPairingError::Finished));
+    assert_eq!(pairings.respond(&stale.id, SYNTHETIC_PIN), Err(PinPairingError::Cancelled));
+    assert_eq!(pairings.respond("not-a-challenge", SYNTHETIC_PIN), Err(PinPairingError::UnknownChallenge));
+    assert_eq!(pairings.cancel(&fresh.id), Err(PinPairingError::Finished));
+    assert_eq!(receiver.paths().len(), exchanges);
+    assert_eq!(saved(&store), Some(trusted));
+}
+
+#[test]
+fn wrong_code_and_cancellation_keep_last_saved_record() {
+    let (_, prior) = paired_record();
+    let store = Arc::new(MemoryStore::default());
+    store.save(&prior).unwrap();
+    let before = saved(&store);
+    let pairings = PinPairings::new(store.clone());
+    let receiver = SharedReceiver::new(SyntheticReceiver::new(SYNTHETIC_PIN));
+
+    let challenge = pairings.begin(SYNTHETIC_RECEIVER_ID, PinSource::OnScreen, receiver.boxed()).unwrap();
+    assert_eq!(pairings.respond(&challenge.id, "9999"), Err(PinPairingError::WrongCode));
+    assert!(receiver.paths().iter().all(|(_, s)| *s != Some(0x05)));
+    assert!(receiver.0.lock().unwrap().controller_ltpk.is_empty());
+    assert_eq!(pairings.respond(&challenge.id, SYNTHETIC_PIN), Err(PinPairingError::Finished));
+    assert_eq!(saved(&store), before);
+
+    let challenge = pairings.begin(SYNTHETIC_RECEIVER_ID, PinSource::OnScreen, receiver.boxed()).unwrap();
+    pairings.cancel(&challenge.id).unwrap();
+    assert_eq!(pairings.respond(&challenge.id, SYNTHETIC_PIN), Err(PinPairingError::Cancelled));
+    assert_eq!(pairings.cancel(&challenge.id), Err(PinPairingError::Cancelled));
+    assert!(receiver.paths().iter().all(|(_, s)| *s != Some(0x05)));
+    assert_eq!(saved(&store), before);
+}
+
+#[test]
+fn expired_challenge_requires_a_new_attempt() {
+    let store = Arc::new(MemoryStore::default());
+    let pairings = PinPairings::new(store.clone()).with_expiry(Duration::ZERO);
+    let receiver = SharedReceiver::new(SyntheticReceiver::new(SYNTHETIC_PIN));
+    let challenge = pairings.begin(SYNTHETIC_RECEIVER_ID, PinSource::Static, receiver.boxed()).unwrap();
+    assert_eq!(pairings.respond(&challenge.id, SYNTHETIC_PIN), Err(PinPairingError::Expired));
+    assert_eq!(pairings.cancel(&challenge.id), Err(PinPairingError::Expired));
+    assert_eq!(receiver.paths(), steps(STARTED));
+    assert!(saved(&store).is_none());
+}
+
+#[test]
+fn receiver_backoff_and_max_peers_are_typed_results() {
+    let store = Arc::new(MemoryStore::default());
+    let pairings = PinPairings::new(store.clone());
+    let mut busy = SyntheticReceiver::new(SYNTHETIC_PIN);
+    busy.fail_setup = Some((0x01, 0x03));
+    let busy = SharedReceiver::new(busy);
+    assert_eq!(pairings.begin(SYNTHETIC_RECEIVER_ID, PinSource::OnScreen, busy.boxed()), Err(PinPairingError::Backoff));
+
+    let mut full = SyntheticReceiver::new(SYNTHETIC_PIN);
+    full.fail_setup = Some((0x05, 0x04));
+    let full = SharedReceiver::new(full);
+    let challenge = pairings.begin(SYNTHETIC_RECEIVER_ID, PinSource::OnScreen, full.boxed()).unwrap();
+    assert_eq!(pairings.respond(&challenge.id, SYNTHETIC_PIN), Err(PinPairingError::MaxPeers));
+    assert!(saved(&store).is_none());
+}
+
+#[test]
+fn fresh_process_pair_verify_uses_trust_from_answered_challenge() {
+    let tmp = TempDir::new();
+    let receiver = SharedReceiver::new(SyntheticReceiver::new(SYNTHETIC_PIN));
+    {
+        let pairings = PinPairings::new(Arc::new(FileStore::new(&tmp.0)));
+        let challenge = pairings.begin(SYNTHETIC_RECEIVER_ID, PinSource::OnScreen, receiver.boxed()).unwrap();
+        pairings.respond(&challenge.id, SYNTHETIC_PIN).unwrap();
+    }
+    let Stored::Paired(record) = FileStore::new(&tmp.0).load(SYNTHETIC_RECEIVER_ID).unwrap() else { panic!("not saved") };
+    let mut receiver = Arc::try_unwrap(receiver.0).ok().unwrap().into_inner().unwrap();
+    assert_eq!(record.accessory_public_key.to_vec(), receiver.accessory_ltpk());
+    receiver.transcript.clear();
+    assert_eq!(reconnect(&mut receiver, &record).unwrap(), Proven::VerifiedReconnect);
+    assert_eq!(receiver.paths(), vec![("/pair-verify", Some(0x01)), ("/pair-verify", Some(0x03))]);
 }
