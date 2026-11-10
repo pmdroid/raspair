@@ -383,7 +383,7 @@ pub fn run(input: &[String]) -> i32 {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use airplay_core::protocol::{FeatureFlags, TxtRecord};
     use airplay_core::stream::{BufferedCodec, BufferedFeed, BufferedProgress, BufferedSink, BufferedWriter};
@@ -410,7 +410,7 @@ mod tests {
         }
     }
 
-    fn write_wav(path: &Path, frames: u32) {
+    pub(crate) fn write_wav(path: &Path, frames: u32) {
         let data = vec![0u8; frames as usize * 6];
         let mut wav = Vec::new();
         wav.extend_from_slice(b"RIFF");
@@ -431,9 +431,9 @@ mod tests {
         fn send_frame(&mut self, _: &[u8], _: &dyn Fn() -> bool) -> airplay_core::Result<()> { Ok(()) }
     }
 
-    struct Fake {
-        profile: Option<ProfileSelection>,
-        hold: bool,
+    pub(crate) struct Fake {
+        pub(crate) profile: Option<ProfileSelection>,
+        pub(crate) hold: bool,
     }
 
     impl PlayerSink for Fake {
