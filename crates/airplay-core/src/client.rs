@@ -4,7 +4,7 @@
 
 use crate::audio::{self, PcmEncoder};
 use crate::discovery::Device;
-use crate::pairing::{CredentialStore, FileStore, PairingSession, Stored};
+use crate::pairing::{CredentialStore, FileStore, PairingError, PairingSession, StoreError, Stored};
 use crate::protocol::HapPairing;
 use crate::rtsp::{setup, Client as RtspClient};
 use crate::stream::{self, BufferedStream, RealtimeStream, TimingServer};
@@ -327,12 +327,14 @@ impl Client {
             session.pair_homepod(&mut rtsp).context("pair HomePod")?;
             self.shared_secret = session.shared_secret.clone();
         } else {
-            match self.credential_store()?.load(&dev.record.device_id)? {
-                Stored::Paired(record) => session.use_record(&record),
-                Stored::Missing => bail!("not paired with {} yet — run the pair step first", dev.name),
-                Stored::RePairRequired { .. } => {
-                    bail!("not paired with {}: legacy key lacks receiver trust, run the pair step again", dev.name)
-                }
+            match self.credential_store()?.load(&dev.record.device_id) {
+                Ok(Stored::Paired(record)) => session.use_record(&record),
+                Ok(Stored::Missing) => return Err(PairingError::NotPaired.into()),
+                Ok(Stored::RePairRequired { .. }) => return Err(PairingError::LegacyKeyOnly.into()),
+                Err(
+                    StoreError::Malformed { .. } | StoreError::InvalidField { .. } | StoreError::UnsupportedVersion { .. },
+                ) => return Err(PairingError::InvalidRecord.into()),
+                Err(e) => return Err(e.into()),
             }
             session.pair_verify(&mut rtsp).context("pair-verify")?;
             self.shared_secret = session.shared_secret.clone();

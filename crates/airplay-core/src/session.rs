@@ -381,6 +381,9 @@ fn translate(error: anyhow::Error) -> SessionError {
     if let Some(typed) = error.downcast_ref::<SessionError>() {
         return typed.clone();
     }
+    if let Some(pairing) = error.downcast_ref::<crate::pairing::PairingError>() {
+        return if pairing.requires_re_pair() { SessionError::ChallengeRequired } else { SessionError::Authentication };
+    }
     if error.chain().any(|c| c.is::<StoreError>()) {
         return SessionError::LocalPermissions;
     }
@@ -393,10 +396,6 @@ fn translate(error: anyhow::Error) -> SessionError {
                 _ => SessionError::ConnectionLost,
             };
         }
-    }
-    let text = format!("{error:#}");
-    if text.contains("not paired") {
-        return SessionError::ChallengeRequired;
     }
     SessionError::Authentication
 }

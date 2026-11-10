@@ -1,6 +1,6 @@
 //! Ed25519 controller identity. Persistence lives in [`super::store`].
 
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use rand::rngs::OsRng;
 
 #[derive(Clone)]
@@ -54,5 +54,5 @@ pub fn verify(public_key: &[u8], msg: &[u8], sig: &[u8]) -> bool {
         Ok(s) => s,
         Err(_) => return false,
     };
-    vk.verify(msg, &signature).is_ok()
+    vk.verify_strict(msg, &signature).is_ok()
 }

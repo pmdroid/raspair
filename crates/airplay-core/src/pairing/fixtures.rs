@@ -1,7 +1,7 @@
 use super::crypto::{chacha20poly1305_decrypt, chacha20poly1305_encrypt, hkdf_expand, nonce_from_string};
 use super::identity::{self, Identity};
-use super::store::{CredentialStore, MemoryStore, Stored};
-use super::session::{PairTransport, PairingSession, HOMEPOD_PIN};
+use super::store::{CredentialStore, FileStore, MemoryStore, PairingRecord, Stored};
+use super::session::{PairTransport, PairingError, PairingSession, HOMEPOD_PIN};
 use super::srp::{compute_k, generator, h, modulus, padded_bytes, GROUP_BYTES};
 use super::tlv::{self, TlvItem};
 use anyhow::{anyhow, bail, Result};
@@ -33,7 +33,6 @@ struct Exchange {
 enum Proven {
     PairSuccess,
     VerifiedReconnect,
-    UnverifiedReconnect,
 }
 
 struct SyntheticReceiver {
@@ -47,6 +46,7 @@ struct SyntheticReceiver {
     controller_ltpk: Vec<u8>,
     controller_curve: Vec<u8>,
     verify_key: Vec<u8>,
+    tamper_verify_sig: bool,
 }
 
 impl SyntheticReceiver {
@@ -72,6 +72,7 @@ impl SyntheticReceiver {
             controller_ltpk: Vec::new(),
             controller_curve: Vec::new(),
             verify_key: Vec::new(),
+            tamper_verify_sig: false,
         }
     }
 
@@ -156,10 +157,13 @@ impl SyntheticReceiver {
         let secret = x25519(SYNTHETIC_CURVE_SECRET, client);
         self.verify_key = hkdf_expand(&secret, b"Pair-Verify-Encrypt-Salt", "Pair-Verify-Encrypt-Info", 32);
         self.controller_curve = client_curve.to_vec();
-        let sig = self.signing.sign(&[server_curve.as_slice(), SYNTHETIC_ACCESSORY_ID, client_curve].concat());
+        let mut sig = self.signing.sign(&[server_curve.as_slice(), SYNTHETIC_ACCESSORY_ID, client_curve].concat()).to_bytes();
+        if self.tamper_verify_sig {
+            sig[0] ^= 0x01;
+        }
         let inner = tlv::encode(&[
             TlvItem::new(tlv::TLV_IDENTIFIER, SYNTHETIC_ACCESSORY_ID.to_vec()),
-            TlvItem::new(tlv::TLV_SIGNATURE, sig.to_bytes().to_vec()),
+            TlvItem::new(tlv::TLV_SIGNATURE, sig.to_vec()),
         ]);
         Ok(tlv::encode(&[
             TlvItem::new(tlv::TLV_STATE, vec![0x02]),
@@ -209,16 +213,56 @@ impl PairTransport for SyntheticReceiver {
     }
 }
 
-fn reconnect(receiver: &mut SyntheticReceiver, identity: Identity, server_ltpk: Vec<u8>) -> Result<Proven> {
-    let mut session = PairingSession::new(SYNTHETIC_RECEIVER_ID, SYNTHETIC_PIN);
-    session.identity = Some(identity);
-    session.server_ltpk = server_ltpk;
-    session.pair_verify(receiver)?;
-    if session.server_ltpk.len() == 32 {
-        Ok(Proven::VerifiedReconnect)
-    } else {
-        Ok(Proven::UnverifiedReconnect)
+struct TempDir(std::path::PathBuf);
+
+impl TempDir {
+    fn new() -> Self {
+        let p = std::env::temp_dir().join(format!("airplay-fixture-{}-{}", std::process::id(), rand::random::<u64>()));
+        std::fs::create_dir_all(&p).unwrap();
+        Self(p)
     }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+struct EmptyError;
+
+impl PairTransport for EmptyError {
+    fn post(&mut self, _: &str, _: &[(String, String)], _: &[u8]) -> Result<Vec<u8>> {
+        Ok(vec![tlv::TLV_STATE, 1, 0x02, tlv::TLV_ERROR, 0])
+    }
+}
+
+fn reconnect(receiver: &mut SyntheticReceiver, record: &PairingRecord) -> Result<Proven> {
+    let mut session = PairingSession::new(SYNTHETIC_RECEIVER_ID, SYNTHETIC_PIN);
+    session.use_record(record);
+    session.pair_verify(receiver)?;
+    assert_eq!(session.shared_secret.len(), 32);
+    Ok(Proven::VerifiedReconnect)
+}
+
+fn paired_record() -> (SyntheticReceiver, PairingRecord) {
+    let mut receiver = SyntheticReceiver::new(SYNTHETIC_PIN);
+    let mut session = PairingSession::new(SYNTHETIC_RECEIVER_ID, SYNTHETIC_PIN);
+    session.pair_apple_tv(&mut receiver).unwrap();
+    receiver.transcript.clear();
+    (receiver, session.pairing_record().unwrap())
+}
+
+fn rejected(receiver: &mut SyntheticReceiver, record: &PairingRecord) -> PairingError {
+    let mut session = PairingSession::new(SYNTHETIC_RECEIVER_ID, SYNTHETIC_PIN);
+    session.use_record(record);
+    let err = session.pair_verify(receiver).unwrap_err();
+    assert!(session.shared_secret.is_empty());
+    assert!(session.session_key.is_empty());
+    assert!(receiver.transcript.iter().all(|e| e.state == Some(0x01)));
+    let typed = err.downcast_ref::<PairingError>().cloned().expect("typed pairing error");
+    assert!(typed.requires_re_pair());
+    typed
 }
 
 #[test]
@@ -276,15 +320,48 @@ fn persistent_pin_transcript_separates_pair_success_and_verified_reconnect() {
     store.save(&session.pairing_record().unwrap()).unwrap();
     let Stored::Paired(record) = store.load(SYNTHETIC_RECEIVER_ID).unwrap() else { panic!("record not saved") };
     assert_eq!(record.accessory_public_key.to_vec(), receiver.accessory_ltpk());
-    let saved = record.controller_key;
-    assert_eq!(saved.public_key(), controller.public_key());
+    assert_eq!(record.controller_key.public_key(), controller.public_key());
 
     receiver.transcript.clear();
-    let proven = reconnect(&mut receiver, saved, session.server_ltpk.clone()).unwrap();
+    let proven = reconnect(&mut receiver, &record).unwrap();
     assert_eq!(proven, Proven::VerifiedReconnect);
     assert_eq!(receiver.paths(), vec![("/pair-verify", Some(0x01)), ("/pair-verify", Some(0x03))]);
     assert!(receiver.transcript.iter().all(|e| e.hkp == "3"));
     assert!(!receiver.saw_playback());
+}
+
+#[test]
+fn reloaded_record_verifies_receiver_after_process_state_is_dropped() {
+    let tmp = TempDir::new();
+    let mut receiver = SyntheticReceiver::new(SYNTHETIC_PIN);
+    {
+        let store = FileStore::new(&tmp.0);
+        let mut session = PairingSession::new(SYNTHETIC_RECEIVER_ID, SYNTHETIC_PIN);
+        session.load_or_create_identity(&store).unwrap();
+        session.pair_apple_tv(&mut receiver).unwrap();
+        store.save(&session.pairing_record().unwrap()).unwrap();
+    }
+    receiver.transcript.clear();
+    let Stored::Paired(record) = FileStore::new(&tmp.0).load(SYNTHETIC_RECEIVER_ID).unwrap() else { panic!("not reloaded") };
+    assert_eq!(record.accessory_id.as_bytes(), SYNTHETIC_ACCESSORY_ID);
+    assert_eq!(reconnect(&mut receiver, &record).unwrap(), Proven::VerifiedReconnect);
+    assert_eq!(receiver.paths(), vec![("/pair-verify", Some(0x01)), ("/pair-verify", Some(0x03))]);
+}
+
+#[test]
+fn legacy_pem_state_re_pairs_explicitly_and_stays_intact() {
+    let tmp = TempDir::new();
+    let legacy = tmp.0.join(format!("{SYNTHETIC_RECEIVER_ID}.pem"));
+    std::fs::write(&legacy, b"-----BEGIN ED25519 PRIVATE KEY-----\n").unwrap();
+    let store = FileStore::new(&tmp.0);
+    assert!(matches!(store.load(SYNTHETIC_RECEIVER_ID).unwrap(), Stored::RePairRequired { .. }));
+    let mut receiver = SyntheticReceiver::new(SYNTHETIC_PIN);
+    let mut session = PairingSession::new(SYNTHETIC_RECEIVER_ID, SYNTHETIC_PIN);
+    session.load_or_create_identity(&store).unwrap();
+    session.pair_apple_tv(&mut receiver).unwrap();
+    store.save(&session.pairing_record().unwrap()).unwrap();
+    assert_eq!(std::fs::read(&legacy).unwrap(), b"-----BEGIN ED25519 PRIVATE KEY-----\n");
+    assert!(matches!(store.load(SYNTHETIC_RECEIVER_ID).unwrap(), Stored::Paired(_)));
 }
 
 #[test]
@@ -298,30 +375,86 @@ fn persistent_pairing_rejects_wrong_pin_before_identity_exchange() {
 }
 
 #[test]
-fn reconnect_rejects_impostor_when_receiver_ltpk_is_known() {
-    let genuine = SyntheticReceiver::new(SYNTHETIC_PIN).accessory_ltpk();
-    let controller = Identity::generate();
+fn reconnect_rejects_receiver_signing_with_a_different_key() {
+    let (genuine, record) = paired_record();
     let mut impostor = SyntheticReceiver::with_signing_seed(SYNTHETIC_PIN, SYNTHETIC_IMPOSTOR_SEED);
-    impostor.controller_ltpk = controller.public_key().to_vec();
-    let err = reconnect(&mut impostor, controller, genuine).unwrap_err();
-    assert!(format!("{err:#}").contains("accessory verify signature failed"));
+    impostor.controller_ltpk = genuine.controller_ltpk.clone();
+    assert_eq!(rejected(&mut impostor, &record), PairingError::SignatureInvalid);
     assert_eq!(impostor.transcript.len(), 1);
 }
 
 #[test]
-fn reconnect_without_receiver_ltpk_is_not_counted_as_verified() {
-    let controller = Identity::generate();
-    let mut impostor = SyntheticReceiver::with_signing_seed(SYNTHETIC_PIN, SYNTHETIC_IMPOSTOR_SEED);
-    impostor.controller_ltpk = controller.public_key().to_vec();
-    let proven = reconnect(&mut impostor, controller, Vec::new()).unwrap();
-    assert_eq!(proven, Proven::UnverifiedReconnect);
+fn reconnect_rejects_wrong_trusted_key_in_record() {
+    let (mut receiver, mut record) = paired_record();
+    record.accessory_public_key = SigningKey::from_bytes(&SYNTHETIC_IMPOSTOR_SEED).verifying_key().to_bytes();
+    assert_eq!(rejected(&mut receiver, &record), PairingError::SignatureInvalid);
+    assert_eq!(receiver.transcript.len(), 1);
+}
+
+#[test]
+fn reconnect_rejects_changed_accessory_id() {
+    let (mut receiver, mut record) = paired_record();
+    record.accessory_id = "00000000-OTHE-RACC-ESSO-RY0000000000".into();
+    assert_eq!(rejected(&mut receiver, &record), PairingError::AccessoryIdMismatch);
+    assert_eq!(receiver.transcript.len(), 1);
+}
+
+#[test]
+fn reconnect_rejects_tampered_signature() {
+    let (mut receiver, record) = paired_record();
+    receiver.tamper_verify_sig = true;
+    assert_eq!(rejected(&mut receiver, &record), PairingError::SignatureInvalid);
+    assert_eq!(receiver.transcript.len(), 1);
+}
+
+#[test]
+fn reconnect_without_trusted_key_fails_before_contacting_receiver() {
+    let (mut receiver, record) = paired_record();
+    for (ltpk, id) in [(Vec::new(), record.accessory_id.clone()), (vec![0u8; 31], record.accessory_id.clone()), (record.accessory_public_key.to_vec(), String::new())] {
+        let mut session = PairingSession::new(SYNTHETIC_RECEIVER_ID, SYNTHETIC_PIN);
+        session.identity = Some(record.controller_key.clone());
+        session.server_ltpk = ltpk;
+        session.accessory_id = id;
+        let err = session.pair_verify(&mut receiver).unwrap_err();
+        assert_eq!(err.downcast_ref::<PairingError>(), Some(&PairingError::MissingTrust));
+        assert!(session.shared_secret.is_empty());
+    }
+    assert!(receiver.transcript.is_empty());
+}
+
+#[test]
+fn empty_error_tlvs_return_typed_protocol_errors() {
+    let (_, record) = paired_record();
+    let mut session = PairingSession::new(SYNTHETIC_RECEIVER_ID, SYNTHETIC_PIN);
+    session.use_record(&record);
+    let err = session.pair_verify(&mut EmptyError).unwrap_err();
+    assert_eq!(err.downcast_ref::<PairingError>(), Some(&PairingError::Protocol { step: "pair-verify M2", code: None }));
+    let err = PairingSession::new(SYNTHETIC_RECEIVER_ID, SYNTHETIC_PIN).pair_homepod(&mut EmptyError).unwrap_err();
+    assert_eq!(err.downcast_ref::<PairingError>(), Some(&PairingError::Protocol { step: "M2", code: None }));
+    assert!(format!("{err:#}").contains("empty error code"));
+}
+
+#[test]
+fn truncated_error_tlv_is_rejected_without_panic() {
+    struct Truncated;
+    impl PairTransport for Truncated {
+        fn post(&mut self, _: &str, _: &[(String, String)], _: &[u8]) -> Result<Vec<u8>> {
+            Ok(vec![tlv::TLV_ERROR, 4, 0x02])
+        }
+    }
+    let (_, record) = paired_record();
+    let mut session = PairingSession::new(SYNTHETIC_RECEIVER_ID, SYNTHETIC_PIN);
+    session.use_record(&record);
+    assert!(format!("{:#}", session.pair_verify(&mut Truncated).unwrap_err()).contains("truncated TLV"));
 }
 
 #[test]
 fn reconnect_fails_when_receiver_does_not_know_controller() {
     let mut receiver = SyntheticReceiver::new(SYNTHETIC_PIN);
     receiver.controller_ltpk = Identity::generate().public_key().to_vec();
-    let ltpk = receiver.accessory_ltpk();
-    let err = reconnect(&mut receiver, Identity::generate(), ltpk).unwrap_err();
+    let (_, mut record) = paired_record();
+    record.controller_key = Identity::generate();
+    let err = reconnect(&mut receiver, &record).unwrap_err();
     assert!(format!("{err:#}").contains("pair-verify M4 error: code=2"));
+    assert!(err.downcast_ref::<PairingError>().unwrap().requires_re_pair());
 }
