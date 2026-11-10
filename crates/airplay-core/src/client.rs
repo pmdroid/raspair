@@ -1176,6 +1176,20 @@ impl Client {
         Ok(())
     }
 
+    pub fn flush_buffered(&mut self) -> Result<()> {
+        if self.rtsp.is_none() {
+            bail!("not connected");
+        }
+        let (seq, rtp) = self.buffered.as_ref().map(|b| (b.seq(), b.rtp_timestamp())).ok_or_else(|| anyhow!("buffered stream not set up"))?;
+        let path = self.rtsp_path.clone();
+        let flush = setup::new_flush_buffered(&path, 0, rtp, seq.wrapping_sub(1) & 0xFF_FFFF, rtp)?;
+        let resp = self.rtsp_mut().do_request(flush).context("flush buffered")?;
+        if resp.status_code != 200 {
+            bail!("flush buffered returned {}", resp.status_code);
+        }
+        Ok(())
+    }
+
     /// Whether a buffered stream is configured (after `setup_buffered`).
     pub fn has_buffered(&self) -> bool {
         self.buffered.is_some()
@@ -1564,16 +1578,19 @@ pub fn stream_buffered_synchronized(
 ) -> Result<stream::BufferedProgress> {
     stream::BufferedCodec::of(format)?;
     let anchor_local = arm_buffered_synchronized(clients).inspect_err(|error| feed.fail(error))?;
-    stream_buffered_armed(clients, format, anchor_local, feed, cancelled, on_progress)
+    stream_buffered_armed(clients, format, anchor_local, feed, cancelled, &|| false, on_progress, &mut |_| Ok(()))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn stream_buffered_armed(
     clients: &mut [Client],
     format: &BufferedAudioFormat,
     anchor_local: Instant,
     feed: &stream::BufferedFeed,
     cancelled: &dyn Fn() -> bool,
+    interrupted: &dyn Fn() -> bool,
     on_progress: &mut dyn FnMut(stream::BufferedProgress),
+    control: &mut dyn FnMut(&mut [Client]) -> Result<()>,
 ) -> Result<stream::BufferedProgress> {
     let b = clients.first().and_then(|c| c.buffered.as_ref()).ok_or_else(|| anyhow!("buffered stream not set up"))?;
     let writer = stream::BufferedWriter {
@@ -1583,8 +1600,8 @@ pub(crate) fn stream_buffered_armed(
         anchor_local,
         send_lead: buffered_send_lead(),
     };
-    let progress = writer.run(clients, feed, cancelled, on_progress)?;
-    stream::buffered::wait_until(anchor_local + writer.interval * progress.packets as u32, cancelled)?;
+    let progress = writer.run_with(clients, feed, cancelled, interrupted, on_progress, control)?;
+    stream::buffered::wait_until(anchor_local + writer.interval * progress.packets as u32, &|| cancelled() || interrupted())?;
     Ok(progress)
 }
 

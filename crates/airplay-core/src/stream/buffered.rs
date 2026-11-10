@@ -420,21 +420,46 @@ impl BufferedWriter {
         cancelled: &dyn Fn() -> bool,
         on_progress: &mut dyn FnMut(BufferedProgress),
     ) -> Result<BufferedProgress> {
-        self.pump(sinks, feed, cancelled, on_progress).inspect_err(|error| feed.fail(error))
+        self.run_with(sinks, feed, cancelled, &|| false, on_progress, &mut |_| Ok(()))
     }
 
-    fn pump<S: BufferedSink>(&self, sinks: &mut [S], feed: &BufferedFeed, cancelled: &dyn Fn() -> bool, on_progress: &mut dyn FnMut(BufferedProgress)) -> Result<BufferedProgress> {
+    pub fn run_with<S: BufferedSink>(
+        &self,
+        sinks: &mut [S],
+        feed: &BufferedFeed,
+        cancelled: &dyn Fn() -> bool,
+        interrupted: &dyn Fn() -> bool,
+        on_progress: &mut dyn FnMut(BufferedProgress),
+        control: &mut dyn FnMut(&mut [S]) -> Result<()>,
+    ) -> Result<BufferedProgress> {
+        self.pump(sinks, feed, cancelled, interrupted, on_progress, control).inspect_err(|error| feed.fail(error))
+    }
+
+    fn pump<S: BufferedSink>(
+        &self,
+        sinks: &mut [S],
+        feed: &BufferedFeed,
+        cancelled: &dyn Fn() -> bool,
+        interrupted: &dyn Fn() -> bool,
+        on_progress: &mut dyn FnMut(BufferedProgress),
+        control: &mut dyn FnMut(&mut [S]) -> Result<()>,
+    ) -> Result<BufferedProgress> {
+        let stop = || cancelled() || interrupted();
         let mut progress = feed.progress();
-        while let Some(block) = feed.next(self.samples_per_frame, cancelled)? {
+        while let Some(block) = feed.next(self.samples_per_frame, &stop)? {
             let payload = self.codec.encode(&block, self.samples_per_frame);
             for sink in sinks.iter_mut() {
                 sink.send_frame(&payload, cancelled).with_context(|| format!("write frame {}", progress.packets))?;
             }
             progress = feed.sent(block.len() / FRAME_CHANNELS);
             on_progress(progress);
+            control(sinks)?;
+            if interrupted() {
+                bail!(SessionError::Cancelled);
+            }
             let target = self.anchor_local + self.interval * progress.packets as u32;
             if let Some(due) = target.checked_sub(self.send_lead) {
-                wait_until(due, cancelled)?;
+                wait_until(due, &stop)?;
             }
         }
         Ok(progress)
