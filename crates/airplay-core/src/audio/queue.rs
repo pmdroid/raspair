@@ -84,6 +84,19 @@ pub fn scan(paths: &[PathBuf], options: &ScanOptions, cancel: &Cancellation) -> 
     Ok(report)
 }
 
+pub fn subfolders(dir: &Path) -> Vec<PathBuf> {
+    let mut found: Vec<PathBuf> = fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .take(MAX_QUEUE_ENTRIES)
+        .collect();
+    found.sort_by(|a, b| natural_path_cmp(a, b));
+    found
+}
+
 struct Found {
     limit: usize,
     candidates: Vec<PathBuf>,
@@ -401,6 +414,12 @@ impl Queue {
         let pos = self.position(id).ok_or(QueueError::UnknownEntry(id))?;
         self.cursor = Cursor::At(id);
         Ok(&self.entries[pos])
+    }
+
+    pub fn cue(&mut self, id: EntryId) -> Result<(), QueueError> {
+        self.position(id).ok_or(QueueError::UnknownEntry(id))?;
+        self.cursor = Cursor::Before(id);
+        Ok(())
     }
 
     pub fn peek_next(&self) -> Option<EntryId> {
