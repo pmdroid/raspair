@@ -12,5 +12,5 @@ pub mod timing_server;
 pub use buffered::{buffered_ssrc_for_audio_format, BufferedStream};
 pub use encrypt::generate_shk;
 pub use ntp::ntp_now;
-pub use realtime::RealtimeStream;
+pub use realtime::{RealtimeProgress, RealtimeSender, RealtimeSink, RealtimeStream};
 pub use timing_server::TimingServer;
