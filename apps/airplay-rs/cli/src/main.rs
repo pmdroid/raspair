@@ -1,7 +1,9 @@
 //! `airplay` — a discover-and-play CLI over airplay-core.
 //!
-//!   airplay discover
-//!   airplay pair  --device NAME [--pin 1234]
+//!   airplay discover [--json]
+//!   airplay pair  --device ID|NAME [--json]
+//!   airplay paired [--json]
+//!   airplay forget --device ID|NAME [--json]
 //!   airplay play  --device NAME --file song.flac [--mode auto|realtime|buffered]
 //!                 (auto plays files as strict buffered PCM 24-bit/48 kHz)
 //!                 [--lossless]
@@ -16,23 +18,29 @@ use airplay_core::client::{
     play_buffered_frames_synchronized, play_pcm_synchronized, AudioCodec, BufferedAudioFormat, Client,
 };
 use airplay_core::discovery::{self, Device};
+use airplay_core::pairing::{CredentialStore, FileStore};
 use airplay_core::profile::{preflight, FallbackPolicy, OutputProfile, QualityReport, SourceFormat};
 use airplay_core::SessionProfile;
 use anyhow::{anyhow, bail, Context, Result};
+use std::sync::Arc;
 use std::time::Duration;
+
+mod auth;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let cmd = args.get(1).map(|s| s.as_str()).unwrap_or("discover");
     let rest = &args[args.len().min(2)..];
+    if let Some(dir) = state_dir_arg(rest) {
+        std::env::set_var("AIRPLAY_CONFIG_DIR", dir);
+    }
 
     let result = match cmd {
-        "discover" => run_discover(),
-        "pair" => run_pair(rest),
-        "play" => run_play(rest),
+        "discover" | "pair" | "paired" | "forget" => run_auth(cmd, rest),
+        "play" => run_play(rest).map(|()| 0),
         "-h" | "--help" | "help" => {
             print_usage();
-            Ok(())
+            Ok(0)
         }
         other => {
             eprintln!("unknown command {other:?}\n");
@@ -41,15 +49,32 @@ fn main() {
         }
     };
 
-    if let Err(e) = result {
-        eprintln!("error: {e:#}");
-        std::process::exit(1);
+    match result {
+        Ok(0) => {}
+        Ok(code) => std::process::exit(code),
+        Err(e) => {
+            eprintln!("error: {e:#}");
+            std::process::exit(1);
+        }
     }
+}
+
+fn state_dir_arg(rest: &[String]) -> Option<String> {
+    let mut it = rest.iter();
+    while let Some(a) = it.next() {
+        if a == "--state-dir" {
+            return it.next().filter(|d| !d.is_empty()).cloned();
+        }
+        if let Some(d) = a.strip_prefix("--state-dir=") {
+            return (!d.is_empty()).then(|| d.to_string());
+        }
+    }
+    None
 }
 
 fn print_usage() {
     eprintln!(
-        "Usage:\n  airplay discover\n  airplay pair --device NAME [--pin 1234]\n  airplay play --device NAME --file FILE [--mode auto|realtime|buffered] [--lossless]\n               [--group] [--format aac44100|aac48000|pcm24-48|pcm24-48be|alac48000-24]\n               [--pin 1234] [--volume-db -30] [--no-stereo] [--debug]\n               [--oracle HOST:PORT] [--fairplay-helper PATH] [--fairplay-audio-helper PATH]\n\n  --group  experimental: stream into an entertainment/home-theater group by\n           targeting the Apple TV group leader (see docs/ENTERTAINMENT_GROUPS.md)\n  --oracle HOST:PORT  use a Python MITM oracle helper (bin/fairplay_oracle.py)\n                      to capture the sender-side FairPlay response\n  --fairplay-helper PATH  use a Doubletake fp-m3 binary to compute setup2\n                          from the Apple TV's fresh M2 reply\n  --fairplay-audio-helper PATH  path to the Doubletake fp-audio-key helper\n                                (defaults to fp-audio-key next to --fairplay-helper)"
+        "Usage:\n  airplay discover [--json]\n  airplay pair --device ID|NAME [--json]\n  airplay paired [--json]\n  airplay forget --device ID|NAME [--json]\n  airplay play --device NAME --file FILE [--mode auto|realtime|buffered] [--lossless]\n               [--group] [--format aac44100|aac48000|pcm24-48|pcm24-48be|alac48000-24]\n               [--pin 1234] [--volume-db -30] [--no-stereo] [--debug]\n               [--oracle HOST:PORT] [--fairplay-helper PATH] [--fairplay-audio-helper PATH]\n\n  --state-dir DIR  pairing and device state (default: $AIRPLAY_CONFIG_DIR, then ~/.airplay)\n  pair prompts for PINs and passwords without echo; without a terminal it\n  prints the required challenge and exits with status 2\n  forget removes only the local record; the receiver is not contacted\n  --group  experimental: stream into an entertainment/home-theater group by\n           targeting the Apple TV group leader (see docs/ENTERTAINMENT_GROUPS.md)\n  --oracle HOST:PORT  use a Python MITM oracle helper (bin/fairplay_oracle.py)\n                      to capture the sender-side FairPlay response\n  --fairplay-helper PATH  use a Doubletake fp-m3 binary to compute setup2\n                          from the Apple TV's fresh M2 reply\n  --fairplay-audio-helper PATH  path to the Doubletake fp-audio-key helper\n                                (defaults to fp-audio-key next to --fairplay-helper)"
     );
 }
 
@@ -117,47 +142,23 @@ fn enable_debug() {
 
 // ---- commands --------------------------------------------------------------
 
-fn run_discover() -> Result<()> {
-    println!("Discovering AirPlay devices...");
-    let devices = discovery::load_or_discover("", Duration::from_secs(5), Duration::ZERO)?;
-    if devices.is_empty() {
-        println!("no AirPlay devices found");
-        return Ok(());
-    }
-    for d in &devices {
-        let ip = d.ipv4.map(|v| v.to_string()).unwrap_or_default();
-        let ap2 = if d.supports_ap2() { "✓" } else { "✗" };
-        let buf = if d.supports_buffered_audio() { " buffered" } else { "" };
-        let stereo = if !d.record.tight_sync_id.is_empty() {
-            format!(" [pair:{:.8}]", d.record.tight_sync_id)
-        } else {
-            String::new()
-        };
-        println!(
-            "{:<30} {:<18} {:<15} AP2:{}{}{}",
-            d.name, d.record.model, ip, ap2, buf, stereo
-        );
-    }
-    Ok(())
-}
-
-fn run_pair(input: &[String]) -> Result<()> {
-    let args = Args::parse(input, &["debug"]);
+fn run_auth(cmd: &str, rest: &[String]) -> Result<i32> {
+    let args = Args::parse(rest, &["debug", "json"]);
     if args.has("debug") {
         enable_debug();
     }
-    let name = args.get("device").ok_or_else(|| anyhow!("required: --device NAME"))?;
-    let pin = args.get("pin").unwrap_or("3939");
-
-    let (_devices, dev) = lookup(name)?;
-    if dev.is_homepod() {
-        println!("{} is a HomePod — it pairs transiently at play time, no pairing needed.", dev.name);
-        return Ok(());
+    let store: Arc<dyn CredentialStore> = Arc::new(FileStore::open_default()?);
+    let mut backend = auth::Live::new(store.clone());
+    let mut prompt = auth::Tty;
+    let mut out = std::io::stdout();
+    let mut cli = auth::Cli { backend: &mut backend, store: &*store, prompt: &mut prompt, out: &mut out, json: args.has("json") };
+    let device = || args.get("device").ok_or_else(|| anyhow!("required: --device ID|NAME"));
+    match cmd {
+        "discover" => cli.discover(),
+        "pair" => cli.pair(device()?),
+        "paired" => cli.paired(),
+        _ => cli.forget(device()?),
     }
-    println!("Pairing with {} (PIN {})...", dev.name, pin);
-    Client::pair(&dev, pin)?;
-    println!("Paired with {}. Identity saved.", dev.name);
-    Ok(())
 }
 
 fn run_play(input: &[String]) -> Result<()> {
