@@ -2,6 +2,7 @@
 //! builders and response parsers.
 
 pub mod client;
+pub mod raop;
 pub mod request;
 pub mod setup;
 

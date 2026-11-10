@@ -5,9 +5,11 @@
 
 use super::encrypt::build_audio_packet;
 use super::ntp::ntp_now;
-use super::rtp::random_u16;
+use super::rtp::{build_rtp_header, random_u16};
+use crate::audio::alac::encode_alac_escape_frame_bits;
 use crate::audio::convert::OUTPUT_CHANNELS;
 use crate::audio::pcm::{PcmEncoder, FRAME_SIZE};
+use crate::client::AudioCodec;
 use crate::session::SessionError;
 use anyhow::{anyhow, Context, Result};
 use std::collections::VecDeque;
@@ -106,8 +108,11 @@ impl RealtimeStream {
         self.rtp_timestamp = self.rtp_timestamp.wrapping_add(self.samples_per_frame as u32);
         self.frames_sent += self.samples_per_frame as u64;
 
-        let packet = build_audio_packet(seq, ts, self.ssrc, &self.shk, marker, payload, self.payload_type)
-            .context("build audio packet")?;
+        let packet = match self.shk.is_empty() {
+            true => [&build_rtp_header(seq, ts, self.ssrc, marker, self.payload_type)[..], payload].concat(),
+            false => build_audio_packet(seq, ts, self.ssrc, &self.shk, marker, payload, self.payload_type)
+                .context("build audio packet")?,
+        };
         log::debug!("audio: seq={seq} ts={ts} payload={} packet={}", payload.len(), packet.len());
         self.data_sock
             .as_ref()
@@ -226,6 +231,7 @@ pub struct RealtimeProgress {
 
 pub struct RealtimeSender {
     encoder: PcmEncoder,
+    alac: bool,
     sample_rate: u32,
     sync_every: u64,
     pending: Vec<f32>,
@@ -235,8 +241,13 @@ pub struct RealtimeSender {
 
 impl RealtimeSender {
     pub fn new(sample_rate: u32, latency: Duration) -> Self {
+        Self::with_codec(sample_rate, latency, AudioCodec::Pcm)
+    }
+
+    pub fn with_codec(sample_rate: u32, latency: Duration, codec: AudioCodec) -> Self {
         Self {
             encoder: PcmEncoder::new(sample_rate as i32, OUTPUT_CHANNELS as i32, 16, false),
+            alac: codec == AudioCodec::Alac,
             sample_rate,
             sync_every: (sample_rate as u64 / FRAME_SIZE as u64).max(1),
             pending: Vec::with_capacity(FRAME_SIZE * OUTPUT_CHANNELS),
@@ -283,7 +294,11 @@ impl RealtimeSender {
                 _ => break,
             }
         }
-        sink.send_frame(&self.encoder.encode(block), self.progress.packets == 0)?;
+        let payload = match self.alac {
+            true => encode_alac_escape_frame_bits(block, FRAME_SIZE, 16),
+            false => self.encoder.encode(block),
+        };
+        sink.send_frame(&payload, self.progress.packets == 0)?;
         self.progress.packets += 1;
         self.progress.frames += FRAME_SIZE as u64;
         if self.progress.packets.is_multiple_of(self.sync_every) {

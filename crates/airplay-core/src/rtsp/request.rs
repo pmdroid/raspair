@@ -15,6 +15,7 @@ pub const HEADER_WWW_AUTHENTICATE: &str = "WWW-Authenticate";
 pub const CONTENT_TYPE_BINARY_PLIST: &str = "application/x-apple-binary-plist";
 pub const CONTENT_TYPE_OCTET_STREAM: &str = "application/octet-stream";
 pub const CONTENT_TYPE_PARAMETERS: &str = "text/parameters";
+pub const CONTENT_TYPE_SDP: &str = "application/sdp";
 
 // Receivers gate timing/session behavior on the claimed sender version; these
 // mimic pyatv (proven audible on Apple TVs).
@@ -26,6 +27,7 @@ pub const DIGEST_USERNAME: &str = "iTunes";
 pub enum Method {
     Get,
     Options,
+    Announce,
     Post,
     Setup,
     SetPeers,
@@ -43,6 +45,7 @@ impl Method {
         match self {
             Method::Get => "GET",
             Method::Options => "OPTIONS",
+            Method::Announce => "ANNOUNCE",
             Method::Post => "POST",
             Method::Setup => "SETUP",
             Method::SetPeers => "SETPEERS",
