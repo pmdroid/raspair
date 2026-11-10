@@ -4,6 +4,8 @@
 
 pub mod channel;
 pub mod crypto;
+#[cfg(test)]
+mod fixtures;
 pub mod identity;
 pub mod session;
 pub mod srp;
