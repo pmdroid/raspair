@@ -1,3 +1,5 @@
+use crate::profile::{self, FallbackPolicy, ProfileSelection, ProfileTarget};
+use crate::protocol::StreamCandidate;
 use crate::{BufferedAudioFormat, Client, Device};
 use std::net::{Shutdown, SocketAddr, TcpStream};
 use std::sync::{
@@ -42,7 +44,7 @@ impl Cancellation {
     }
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub enum SessionProfile {
     Realtime { sample_rate: i32 },
     Buffered(BufferedAudioFormat),
@@ -51,6 +53,7 @@ pub enum SessionProfile {
 #[derive(Clone)]
 pub struct SessionOptions {
     pub profile: SessionProfile,
+    pub fallback: FallbackPolicy,
     pub connection_timeout: Duration,
     pub shutdown_timeout: Duration,
     pub pairing_challenge_expiry: Duration,
@@ -62,6 +65,7 @@ impl Default for SessionOptions {
     fn default() -> Self {
         Self {
             profile: SessionProfile::Buffered(BufferedAudioFormat::pcm_48000_24_stereo(true)),
+            fallback: FallbackPolicy::Forbid,
             connection_timeout: Duration::from_secs(20),
             shutdown_timeout: Duration::from_secs(5),
             pairing_challenge_expiry: Duration::from_secs(120),
@@ -74,6 +78,7 @@ impl Default for SessionOptions {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionEvent {
     Connected,
+    Profile(ProfileSelection),
     Stopped,
     Failed(SessionError),
 }
@@ -83,6 +88,7 @@ pub struct Session {
     options: SessionOptions,
     socket: Arc<Mutex<Option<TcpStream>>>,
     events: Vec<SessionEvent>,
+    selection: Option<ProfileSelection>,
 }
 
 impl Session {
@@ -96,24 +102,11 @@ impl Session {
         {
             return Err(SessionError::InvalidInput);
         }
-        match &options.profile {
-            SessionProfile::Realtime { sample_rate } if ![44100, 48000].contains(sample_rate) => {
-                return Err(SessionError::UnsupportedProfile)
-            }
-            SessionProfile::Buffered(f) if f.channels != 2 || f.sample_rate <= 0 || f.samples_per_frame <= 0 => {
-                return Err(SessionError::UnsupportedProfile)
-            }
-            _ => {}
-        }
+        profile::candidates(&options.profile, &options.fallback)?;
         let route = device.route();
         route.hap_pairing()?;
-        let wanted = match options.profile {
-            SessionProfile::Realtime { .. } => crate::protocol::StreamCandidate::Realtime,
-            SessionProfile::Buffered(_) => crate::protocol::StreamCandidate::Buffered,
-        };
-        if !route.streams.contains(&wanted) {
-            return Err(SessionError::UnsupportedProfile);
-        }
+        profile::preflight(&route.streams, &options.profile, &options.fallback)?;
+        let mut options = options;
         let ip = device.ip().ok_or(SessionError::InvalidInput)?;
         let addr = SocketAddr::new(ip.parse().map_err(|_| SessionError::InvalidInput)?, device.port);
         let socket = Arc::new(Mutex::new(None));
@@ -136,24 +129,31 @@ impl Session {
             guard.check()?;
             let rtsp = crate::rtsp::Client::from_stream(&ip, device.port, stream).map_err(translate)?;
             client.connect_transport(device, pin, rtsp).map_err(translate)?;
-            match &options.profile {
-                SessionProfile::Realtime { sample_rate } => client.setup_realtime(*sample_rate, 2),
-                SessionProfile::Buffered(format) => client.setup_buffered(format),
-            }
-            .map_err(translate)?;
-            guard.check()
+            let mut target = ClientTarget { client: &mut client, streams: &route.streams };
+            let negotiated = profile::negotiate(&mut target, &options.profile, &options.fallback)?;
+            guard.check()?;
+            Ok(negotiated)
         })();
         let result = guard.check().and(result);
         drop(guard);
-        if let Err(error) = result {
-            if let Some(s) = socket.lock().unwrap().take() {
-                let _ = s.shutdown(Shutdown::Both);
+        let (effective, selection) = match result {
+            Ok(negotiated) => negotiated,
+            Err(error) => {
+                if let Some(s) = socket.lock().unwrap().take() {
+                    let _ = s.shutdown(Shutdown::Both);
+                }
+                let _ = client.stop();
+                return Err(error);
             }
-            let _ = client.stop();
-            return Err(error);
-        }
+        };
         client.deadline = None;
-        Ok(Self { client: Some(client), options, socket, events: vec![SessionEvent::Connected] })
+        options.profile = effective;
+        let events = vec![SessionEvent::Connected, SessionEvent::Profile(selection)];
+        Ok(Self { client: Some(client), options, socket, events, selection: Some(selection) })
+    }
+
+    pub fn profile(&self) -> Option<ProfileSelection> {
+        self.selection
     }
 
     pub fn events(&mut self) -> impl Iterator<Item = SessionEvent> + '_ {
@@ -269,6 +269,24 @@ impl Drop for Deadline {
     }
 }
 
+struct ClientTarget<'a> {
+    client: &'a mut Client,
+    streams: &'a [StreamCandidate],
+}
+
+impl ProfileTarget for ClientTarget<'_> {
+    fn streams(&self) -> &[StreamCandidate] {
+        self.streams
+    }
+    fn setup(&mut self, profile: &SessionProfile) -> Result<(), SessionError> {
+        match profile {
+            SessionProfile::Realtime { sample_rate } => self.client.setup_realtime(*sample_rate, 2),
+            SessionProfile::Buffered(format) => self.client.setup_buffered(format),
+        }
+        .map_err(translate)
+    }
+}
+
 fn translate(error: anyhow::Error) -> SessionError {
     if let Some(typed) = error.downcast_ref::<SessionError>() {
         return typed.clone();
@@ -304,6 +322,7 @@ mod tests {
             options: SessionOptions::default(),
             socket: Arc::new(Mutex::new(Some(stream))),
             events: Vec::new(),
+            selection: None,
         };
         let start = Instant::now();
         session.cancel().unwrap();

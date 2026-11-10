@@ -11,6 +11,7 @@ pub mod audio;
 pub mod client;
 pub mod discovery;
 pub mod pairing;
+pub mod profile;
 pub mod protocol;
 pub mod rtsp;
 pub mod stream;
@@ -26,3 +27,4 @@ pub use timing::{PtpAnchor, PtpClock};
 
 pub mod session;
 pub use session::{Cancellation, Session, SessionError, SessionEvent, SessionOptions, SessionProfile};
+pub use profile::{FallbackPolicy, FallbackReason, OutputProfile, ProfileSelection, QualityReport, SourceFormat};
