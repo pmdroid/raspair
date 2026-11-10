@@ -14,7 +14,7 @@ pub mod tlv;
 
 pub use channel::ChannelCipher;
 pub use identity::Identity;
-pub use session::{PairTransport, PairingSession};
+pub use session::{PairTransport, PairingError, PairingSession};
 pub use store::{
     resolve_state_dir, AuthMethod, CredentialStore, FileStore, MemoryStore, PairingRecord, StoreError, Stored,
 };

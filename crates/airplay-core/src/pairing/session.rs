@@ -38,6 +38,40 @@ fn err_code_name(code: u8) -> &'static str {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum PairingError {
+    #[error("not paired with this receiver; pair again")]
+    NotPaired,
+    #[error("saved key lacks receiver trust; pair again")]
+    LegacyKeyOnly,
+    #[error("saved pairing record is invalid; pair again")]
+    InvalidRecord,
+    #[error("no trusted receiver key; pair again")]
+    MissingTrust,
+    #[error("receiver identity does not match the saved pairing; pair again")]
+    AccessoryIdMismatch,
+    #[error("receiver signature does not match the saved pairing; pair again")]
+    SignatureInvalid,
+    #[error("{step} error: {}", code.map(|c| format!("code={c} {}", err_code_name(c))).unwrap_or_else(|| "empty error code".into()))]
+    Protocol { step: &'static str, code: Option<u8> },
+}
+
+impl PairingError {
+    pub fn requires_re_pair(&self) -> bool {
+        match self {
+            PairingError::Protocol { step, code } => step.starts_with("pair-verify") && *code == Some(0x02),
+            _ => true,
+        }
+    }
+}
+
+fn check_error(items: &[TlvItem], step: &'static str) -> Result<(), PairingError> {
+    match tlv::get(items, tlv::TLV_ERROR) {
+        Some(e) => Err(PairingError::Protocol { step, code: e.first().copied() }),
+        None => Ok(()),
+    }
+}
+
 /// Posts one pairing message and returns the response body. The RTSP client
 /// implements this so pair-verify runs on the same TCP connection that carries
 /// the encrypted session afterwards.
@@ -152,9 +186,7 @@ impl PairingSession {
         }
         let data = self.post(t, "/pair-setup", &tlv::encode(&tlvs)).context("M1")?;
         let items = tlv::decode(&data).context("decode M2")?;
-        if let Some(e) = tlv::get(&items, tlv::TLV_ERROR) {
-            bail!("M2 error: code={} {}", e[0], err_code_name(e[0]));
-        }
+        check_error(&items, "M2")?;
         let salt = tlv::get(&items, tlv::TLV_SALT)
             .ok_or_else(|| anyhow!("M2 missing salt"))?
             .to_vec();
@@ -177,9 +209,7 @@ impl PairingSession {
         ]);
         let data = self.post(t, "/pair-setup", &m3).context("M3")?;
         let items = tlv::decode(&data).context("decode M4")?;
-        if let Some(e) = tlv::get(&items, tlv::TLV_ERROR) {
-            bail!("M4 error: code={} {}", e[0], err_code_name(e[0]));
-        }
+        check_error(&items, "M4")?;
         match tlv::get(&items, tlv::TLV_STATE) {
             Some(s) if s.first() == Some(&STATE_M4) => {}
             _ => bail!("M4 unexpected state"),
@@ -230,9 +260,7 @@ impl PairingSession {
 
         // M6: accessory identity nested in EncryptedData.
         let items = tlv::decode(&data).context("decode M6")?;
-        if let Some(e) = tlv::get(&items, tlv::TLV_ERROR) {
-            bail!("M6 error: code={} {}", e[0], err_code_name(e[0]));
-        }
+        check_error(&items, "M6")?;
         let m6_enc = tlv::get(&items, tlv::TLV_ENCRYPTED_DATA).ok_or_else(|| anyhow!("M6 missing encrypted data"))?;
         match tlv::get(&items, tlv::TLV_STATE) {
             Some(s) if s.first() == Some(&STATE_M6) => {}
@@ -260,8 +288,12 @@ impl PairingSession {
             bail!("device signature verification failed");
         }
 
+        let accessory_id = String::from_utf8(device_id.to_vec()).context("M6 accessory id")?;
+        if accessory_id.is_empty() {
+            bail!("M6 empty accessory id");
+        }
         self.server_ltpk = device_pub.to_vec();
-        self.accessory_id = String::from_utf8(device_id.to_vec()).context("M6 accessory id")?;
+        self.accessory_id = accessory_id;
         self.session_key = srp_session_key;
         Ok(())
     }
@@ -290,6 +322,14 @@ impl PairingSession {
             .ok_or_else(|| anyhow!("pair-verify requires an identity from pair-setup"))?
             .clone();
 
+        let trusted_key = <[u8; 32]>::try_from(self.server_ltpk.as_slice())
+            .ok()
+            .filter(|k| ed25519_dalek::VerifyingKey::from_bytes(k).is_ok())
+            .ok_or(PairingError::MissingTrust)?;
+        if self.accessory_id.is_empty() {
+            return Err(PairingError::MissingTrust.into());
+        }
+
         let (priv_key, pub_key) = generate_curve25519_keypair();
 
         let m1 = tlv::encode(&[
@@ -298,34 +338,31 @@ impl PairingSession {
         ]);
         let data = self.post(t, "/pair-verify", &m1).context("pair-verify M1")?;
         let items = tlv::decode(&data).context("decode pair-verify M2")?;
-        if let Some(e) = tlv::get(&items, tlv::TLV_ERROR) {
-            bail!("pair-verify M2 error: code={} {}", e[0], err_code_name(e[0]));
-        }
+        check_error(&items, "pair-verify M2")?;
         let accessory_pub = tlv::get(&items, tlv::TLV_PUBLIC_KEY)
             .ok_or_else(|| anyhow!("M2 missing publicKey"))?
             .to_vec();
         let encrypted = tlv::get(&items, tlv::TLV_ENCRYPTED_DATA).ok_or_else(|| anyhow!("M2 missing encryptedData"))?;
 
         let secret = shared_secret(&priv_key, &accessory_pub)?;
-        self.shared_secret = secret.to_vec();
         let session_key = hkdf_expand(&secret, b"Pair-Verify-Encrypt-Salt", "Pair-Verify-Encrypt-Info", 32);
-        self.session_key = session_key.clone();
 
         let decrypted = chacha20poly1305_decrypt(&session_key, &nonce_from_string("PV-Msg02"), encrypted, &[])
             .context("decrypt M2 data")?;
         let inner = tlv::decode(&decrypted).context("decode M2 inner")?;
         let accessory_id = tlv::get(&inner, tlv::TLV_IDENTIFIER).ok_or_else(|| anyhow!("M2 inner missing id"))?;
         let accessory_sig = tlv::get(&inner, tlv::TLV_SIGNATURE).ok_or_else(|| anyhow!("M2 inner missing sig"))?;
+        if accessory_id != self.accessory_id.as_bytes() {
+            return Err(PairingError::AccessoryIdMismatch.into());
+        }
 
         // Signature covers AccessoryCurvePub || AccessoryPairingID || iOSCurvePub.
-        if self.server_ltpk.len() == 32 {
-            let mut payload = Vec::new();
-            payload.extend_from_slice(&accessory_pub);
-            payload.extend_from_slice(accessory_id);
-            payload.extend_from_slice(&pub_key);
-            if !identity::verify(&self.server_ltpk, &payload, accessory_sig) {
-                bail!("accessory verify signature failed");
-            }
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&accessory_pub);
+        payload.extend_from_slice(accessory_id);
+        payload.extend_from_slice(&pub_key);
+        if !identity::verify(&trusted_key, &payload, accessory_sig) {
+            return Err(PairingError::SignatureInvalid.into());
         }
 
         // M3: signature covers iOSCurvePub || iOSPairingID || AccessoryCurvePub.
@@ -349,9 +386,9 @@ impl PairingSession {
         ]);
         let data = self.post(t, "/pair-verify", &m3).context("pair-verify M3")?;
         let items = tlv::decode(&data).context("decode pair-verify M4")?;
-        if let Some(e) = tlv::get(&items, tlv::TLV_ERROR) {
-            bail!("pair-verify M4 error: code={} {}", e[0], err_code_name(e[0]));
-        }
+        check_error(&items, "pair-verify M4")?;
+        self.session_key = session_key;
+        self.shared_secret = secret.to_vec();
         Ok(())
     }
 }
