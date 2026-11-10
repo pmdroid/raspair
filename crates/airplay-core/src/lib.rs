@@ -23,3 +23,6 @@ pub use client::{
 };
 pub use discovery::Device;
 pub use timing::{PtpAnchor, PtpClock};
+
+pub mod session;
+pub use session::{Cancellation, Session, SessionError, SessionEvent, SessionOptions, SessionProfile};

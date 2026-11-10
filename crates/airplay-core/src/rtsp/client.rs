@@ -31,6 +31,10 @@ impl Client {
             .with_context(|| format!("resolve {target}"))?;
         let stream = TcpStream::connect_timeout(&sock, Duration::from_secs(5))
             .with_context(|| format!("dial {target}"))?;
+        Self::from_stream(addr, port, stream)
+    }
+
+    pub(crate) fn from_stream(addr: &str, port: u16, stream: TcpStream) -> Result<Self> {
         let local_addr = stream.local_addr().ok();
         Ok(Self {
             addr: addr.to_string(),
@@ -85,7 +89,7 @@ impl Client {
             let mut tmp = [0u8; 4096];
             let n = self.stream.read(&mut tmp)?;
             if n == 0 {
-                bail!("connection closed by peer");
+                return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "connection closed by peer").into());
             }
             self.inbuf.extend_from_slice(&tmp[..n]);
         }
@@ -209,7 +213,7 @@ impl PairTransport for Client {
     fn post(&mut self, path: &str, headers: &[(String, String)], body: &[u8]) -> Result<Vec<u8>> {
         let resp = self.post_http(path, headers, body)?;
         if resp.status_code != 200 {
-            return Err(anyhow!("POST {path}: {} ({})", resp.status, String::from_utf8_lossy(&resp.body)));
+            return Err(crate::session::SessionError::ReceiverRejected { status: resp.status_code as u16 }.into());
         }
         Ok(resp.body)
     }
