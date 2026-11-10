@@ -9,7 +9,8 @@ pub mod wav;
 
 pub use aac::{encode_aac_file, parse_adts_frames, AAC_LC_44100_STEREO_ASC, AAC_LC_48000_STEREO_ASC};
 pub use alac::{alac_magic_cookie, encode_alac_escape_frame};
-pub use decode::{decode_audio_file, ffmpeg_available};
+pub use decode::{decode_audio_file, ffmpeg_available, AudioInfo, AudioReader, DecodedBlock, Samples, SeekResult};
+pub use symphonia::core::io::MediaSource;
 pub use pcm::PcmEncoder;
 
 use anyhow::Result;
@@ -22,5 +23,14 @@ pub fn load_audio(path: &str, target_sr: i32, target_ch: i32) -> Result<(Vec<f32
             return Ok(decoded);
         }
     }
-    decode_audio_file(path, target_sr, target_ch)
+    let mut reader = AudioReader::open(path)?;
+    let info = reader.info().clone();
+    if info.sample_rate as i32 != target_sr || info.channels as i32 != target_ch {
+        return decode_audio_file(path, target_sr, target_ch);
+    }
+    let mut samples = Vec::new();
+    while let Some(block) = reader.next_block()? {
+        samples.extend(block.samples.to_f32());
+    }
+    Ok((samples, target_sr, target_ch))
 }
