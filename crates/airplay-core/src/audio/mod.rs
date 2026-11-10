@@ -15,7 +15,7 @@ pub use convert::{ConversionPlan, Converter, OutputFormat, SourceFormat};
 pub use decode::{decode_audio_file, ffmpeg_available, AudioInfo, AudioReader, DecodedBlock, Samples, SeekResult};
 pub use symphonia::core::io::MediaSource;
 pub use pcm::{quantize, PcmEncoder};
-pub use queue::{scan, EntryId, Queue, QueueEntry, QueueError, ScanError, ScanOptions, ScanReport, SkipReason, Skipped, Track, TrackMetadata, MAX_QUEUE_ENTRIES};
+pub use queue::{scan, subfolders, EntryId, Queue, QueueEntry, QueueError, ScanError, ScanOptions, ScanReport, SkipReason, Skipped, Track, TrackMetadata, MAX_QUEUE_ENTRIES};
 
 use anyhow::Result;
 

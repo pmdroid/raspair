@@ -2,20 +2,20 @@
 source: apps/airplay-rs/cli/src/tui.rs
 expression: "draw(&fixture(state, Palette::Rgb), width, height).backend()"
 ---
-"┌ Sources ─────────────┐┏ ▸ Queue (3) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓"
-"│Library               │┃   1.   6:52  夜明け前の長い長いプレリュード (Remaster┃" Hidden by multi-width symbols: [(40, " "), (42, " "), (44, " "), (46, " "), (48, " "), (50, " "), (52, " "), (54, " "), (56, " "), (58, " "), (60, " "), (62, " "), (64, " "), (66, " "), (68, " ")]
-"│~/Music/Ｓｈｉｎｊｕｋ│┃▶  2.   3:45  Ünïcödé Sérénade for a Very Long Afterno┃" Hidden by multi-width symbols: [(10, " "), (12, " "), (14, " "), (16, " "), (18, " "), (20, " "), (22, " ")]
-"│~/Music/Björk – Homoge│┃   3.  --:--  🎧 Lo-fi 🌙 Beats                       ┃" Hidden by multi-width symbols: [(40, " "), (49, " ")]
-"│                      │┃                                                      ┃"
-"│Receiver              │┃                                                      ┃"
-"│Wohnzimmer HomePod — K│┃                                                      ┃"
-"│                      │┃                                                      ┃"
-"│                      │┃                                                      ┃"
-"│                      │┃                                                      ┃"
-"│                      │┃                                                      ┃"
-"│                      │┃                                                      ┃"
-"│                      │┃                                                      ┃"
-"└──────────────────────┘┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛"
+"┌ Browse Ｓｈｉｎｊｕｋｕ Ｓｅ─┐┏ ▸ Queue (3) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓" Hidden by multi-width symbols: [(10, " "), (12, " "), (14, " "), (16, " "), (18, " "), (20, " "), (22, " "), (24, " "), (27, " "), (29, " ")]
+"│›↰ ..                         │┃›   1.   6:52  夜明け前の長い長いプレリュード ┃" Hidden by multi-width symbols: [(49, " "), (51, " "), (53, " "), (55, " "), (57, " "), (59, " "), (61, " "), (63, " "), (65, " "), (67, " "), (69, " "), (71, " "), (73, " "), (75, " "), (77, " ")]
+"│ ▹ Disc 2/                    │┃ ▶  2.   3:45  Ünïcödé Sérénade for a Very Lon┃"
+"│   Intro · Björk · Intro.flac │┃    3.  --:--  🎧 Lo-fi 🌙 Beats              ┃" Hidden by multi-width symbols: [(49, " "), (58, " ")]
+"│   Intro · intro (live).flac  │┃                                              ┃"
+"│ ✕ locked.flac unreadable: Per│┃                                              ┃"
+"│                              │┃                                              ┃"
+"│                              │┃                                              ┃"
+"│                              │┃                                              ┃"
+"│                              │┃                                              ┃"
+"│                              │┃                                              ┃"
+"│                              │┃                                              ┃"
+"│                              │┃                                              ┃"
+"└──────────────────────────────┘┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛"
 "┌ Now playing ─────────────────────────────────────────────────────────────────┐"
 "│ ‖ PAUSED  Ünïcödé Sérénade for a Very Long Afternoon in the Café del Mar     │"
 "│ Björk Guðmundsdóttir — Homogenic (Deluxe Édition)                            │"
@@ -25,4 +25,4 @@ expression: "draw(&fixture(state, Palette::Rgb), width, height).backend()"
 "│                                                                              │"
 "│ Space play/pause  ←/→ seek  p/n prev/next  s stop  -/+ vol  m mute           │"
 "└──────────────────────────────────────────────────────────────────────────────┘"
-" ‖ PAUSED · -30.0 dB · Wohnzimmer HomeP  d receivers  Tab focus  ? help  q quit "
+" ‖ PAUSED · -30.0 dB · Wohnzimmer HomePod —  ↵ play x del K/J move c clr ? help "

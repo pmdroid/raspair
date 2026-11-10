@@ -1,0 +1,28 @@
+---
+source: apps/airplay-rs/cli/src/tui.rs
+expression: "draw(&view, width, height).backend()"
+---
+"┏ ▸ Browse Ｓｈｉｎｊｕｋｕ Ｓｅｓｓｉｏｎｓ ━━━━┓" Hidden by multi-width symbols: [(12, " "), (14, " "), (16, " "), (18, " "), (20, " "), (22, " "), (24, " "), (26, " "), (29, " "), (31, " "), (33, " "), (35, " "), (37, " "), (39, " "), (41, " "), (43, " ")]
+"┃ ↰ ..                                           ┃"
+"┃ ▹ Disc 2/                                      ┃"
+"┃   Intro · Björk · Intro.flac                   ┃"
+"┃›  Intro · intro (live).flac                    ┃"
+"┃ ✕ locked.flac unreadable: Permission denied (os┃"
+"┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛"
+"┌ Queue (3) ─────────────────────────────────────┐"
+"│›   1.   6:52  夜明け前の長い長いプレリュード (R│" Hidden by multi-width symbols: [(17, " "), (19, " "), (21, " "), (23, " "), (25, " "), (27, " "), (29, " "), (31, " "), (33, " "), (35, " "), (37, " "), (39, " "), (41, " "), (43, " "), (45, " ")]
+"│ ▶  2.   3:45  Ünïcödé Sérénade for a Very Long │"
+"│    3.  --:--  🎧 Lo-fi 🌙 Beats                │" Hidden by multi-width symbols: [(17, " "), (26, " ")]
+"│                                                │"
+"│                                                │"
+"└────────────────────────────────────────────────┘"
+"┌ Now playing ───────────────────────────────────┐"
+"│ ▶ PLAYING  Ünïcödé Sérénade for a Very Long Af │"
+"│ Björk Guðmundsdóttir — Homogenic (Deluxe Éditi │"
+"│ ━━━━━━━━━━─────────────────── est. 1:23 / 3:45 │"
+"│ Speakers  Wohnzimmer HomePod — Küche & Esszimm │"
+"│ Quality   PCM 24-bit/48 kHz · buffered · nativ │"
+"│                                                │"
+"│ Space play/pause  ←/→ seek  p/n prev/next  s s │"
+"└────────────────────────────────────────────────┘"
+" ▶ PLAYING · ↵ open a add / find ⌫ up d rx ? help "

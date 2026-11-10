@@ -1,4 +1,4 @@
-use airplay_core::audio::{scan, Queue, QueueError, ScanError, ScanOptions, SkipReason};
+use airplay_core::audio::{scan, subfolders, Queue, QueueError, ScanError, ScanOptions, SkipReason};
 use airplay_core::Cancellation;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -141,4 +141,21 @@ fn edits_keep_ids_and_playback_identity() {
     let again = queue.append(tracks[..1].to_vec()).unwrap();
     assert!(again[0] > more[1]);
     assert_eq!(queue.advance().unwrap().id, again[0]);
+}
+
+#[test]
+fn subfolders_are_naturally_ordered_and_cue_starts_at_an_entry() {
+    let dir = library();
+    put(dir.path(), "Disc 10/01.flac", FLAC);
+    put(dir.path(), "disc 2/01.flac", FLAC);
+    assert_eq!(rel(dir.path(), subfolders(dir.path())), ["a", "b", "disc 2", "Disc 10"]);
+    assert!(subfolders(&dir.path().join("missing")).is_empty());
+    let mut queue = Queue::new();
+    let tracks = scan(&[dir.path().to_path_buf()], &ScanOptions::default(), &Cancellation::default()).unwrap().tracks;
+    let ids = queue.append(tracks).unwrap();
+    queue.cue(ids[1]).unwrap();
+    assert_eq!((queue.current(), queue.peek_next(), queue.peek_previous()), (None, Some(ids[1]), Some(ids[0])));
+    assert_eq!(queue.advance().map(|e| e.id), Some(ids[1]));
+    queue.remove(ids[0]);
+    assert_eq!(queue.cue(ids[0]), Err(QueueError::UnknownEntry(ids[0])));
 }
