@@ -4,7 +4,9 @@
 
 use crate::audio::{self, PcmEncoder};
 use crate::discovery::Device;
-use crate::pairing::{CredentialStore, FileStore, PairingError, PairingSession, StoreError, Stored};
+use crate::pairing::{
+    CredentialStore, FileStore, PairingError, PairingSession, PinChallenge, PinPairings, PinSource, StoreError, Stored,
+};
 use crate::protocol::HapPairing;
 use crate::rtsp::{setup, Client as RtspClient};
 use crate::stream::{self, BufferedStream, RealtimeStream, TimingServer};
@@ -305,6 +307,17 @@ impl Client {
         let record = session.pairing_record().ok_or_else(|| anyhow!("pair-setup returned no accessory identity"))?;
         store.save(&record).context("save pairing")?;
         Ok(())
+    }
+
+    pub fn begin_pairing(dev: &Device, pairings: &PinPairings) -> Result<PinChallenge> {
+        let route = dev.route();
+        if route.hap_pairing()? != HapPairing::Persistent {
+            return Err(crate::session::SessionError::UnsupportedAuthentication(route.auth).into());
+        }
+        let addr = dev.ip().ok_or_else(|| anyhow!("no IP address for device"))?;
+        let rtsp = RtspClient::connect(&addr, dev.port).context("RTSP connect")?;
+        let source = if dev.record.displays_pin() { PinSource::OnScreen } else { PinSource::Static };
+        Ok(pairings.begin(&dev.record.device_id, source, Box::new(rtsp))?)
     }
 
     /// Dial the receiver, authenticate on that connection (transient

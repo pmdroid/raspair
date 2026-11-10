@@ -194,9 +194,8 @@ impl PairingSession {
         Ok((salt, BigUint::from_bytes_be(pub_key)))
     }
 
-    fn pair_setup_phase2(&mut self, t: &mut dyn PairTransport, salt: &[u8], b: BigUint) -> Result<()> {
-        let pin = self.pin.clone();
-        let mut srp = SrpClient::new("Pair-Setup", &pin);
+    fn pair_setup_phase2(&mut self, t: &mut dyn PairTransport, salt: &[u8], b: BigUint, pin: &str) -> Result<()> {
+        let mut srp = SrpClient::new("Pair-Setup", pin);
         let a = srp.generate_a();
         srp.process_b(salt, b).context("process B")?;
         let m1_proof = srp.compute_m1();
@@ -300,9 +299,18 @@ impl PairingSession {
 
     /// Persistent pair-setup for an Apple TV (saves a controller identity).
     pub fn pair_apple_tv(&mut self, t: &mut dyn PairTransport) -> Result<()> {
+        let (salt, b) = self.begin_persistent(t)?;
+        let pin = self.pin.clone();
+        self.finish_persistent(t, &salt, b, &pin)
+    }
+
+    pub(crate) fn begin_persistent(&mut self, t: &mut dyn PairTransport) -> Result<(Vec<u8>, BigUint)> {
         self.is_transient = false;
-        let (salt, b) = self.pair_setup_phase1(t)?;
-        self.pair_setup_phase2(t, &salt, b)
+        self.pair_setup_phase1(t)
+    }
+
+    pub(crate) fn finish_persistent(&mut self, t: &mut dyn PairTransport, salt: &[u8], b: BigUint, pin: &str) -> Result<()> {
+        self.pair_setup_phase2(t, salt, b, pin)
     }
 
     /// Transient pair-setup for a HomePod (fixed PIN, no saved identity).
@@ -310,7 +318,7 @@ impl PairingSession {
         self.is_transient = true;
         self.pin = HOMEPOD_PIN.to_string();
         let (salt, b) = self.pair_setup_phase1(t)?;
-        self.pair_setup_phase2(t, &salt, b)
+        self.pair_setup_phase2(t, &salt, b, HOMEPOD_PIN)
     }
 
     /// pair-verify using a previously saved identity. Derives the channel

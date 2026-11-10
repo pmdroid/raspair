@@ -2,6 +2,7 @@
 //! ChaCha20-Poly1305 channel cipher, and the pair-setup/pair-verify state
 //! machine.
 
+pub mod challenge;
 pub mod channel;
 pub mod crypto;
 #[cfg(test)]
@@ -12,6 +13,7 @@ pub mod srp;
 pub mod store;
 pub mod tlv;
 
+pub use challenge::{PinChallenge, PinPairingError, PinPairings, PinSource, DEFAULT_CHALLENGE_EXPIRY};
 pub use channel::ChannelCipher;
 pub use identity::Identity;
 pub use session::{PairTransport, PairingError, PairingSession};

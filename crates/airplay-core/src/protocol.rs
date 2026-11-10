@@ -148,6 +148,10 @@ impl TxtRecord {
         self.has_flags && self.flags & bit != 0
     }
 
+    pub fn displays_pin(&self) -> bool {
+        self.status(STATUS_PIN_REQUIRED) || self.status(STATUS_ONE_TIME_PAIRING_REQUIRED)
+    }
+
     pub fn auth_requirement(&self) -> AuthRequirement {
         let f = self.features;
         let pin = self.status(STATUS_PIN_REQUIRED);

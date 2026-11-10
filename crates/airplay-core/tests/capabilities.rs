@@ -1,6 +1,7 @@
 use airplay_core::protocol::{
     parse_txt_record, AdvertisedAuth, AuthRequirement as A, StreamCandidate as S,
 };
+use airplay_core::pairing::{MemoryStore, PinPairings};
 use airplay_core::{Client, Device, Session, SessionError, SessionOptions};
 
 const HOMEPOD: &[&str] = &["deviceid=AA:BB:CC:00:00:01", "features=0x4A7FDFD5,0x3C155FDE", "flags=0x18644", "model=AudioAccessory5,1"];
@@ -96,4 +97,14 @@ fn unsupported_auth_is_rejected_before_any_exchange() {
     }
     let err = Client::pair(&device(HOMEPOD), "3939").unwrap_err();
     assert_eq!(err.downcast_ref::<SessionError>(), Some(&SessionError::UnsupportedAuthentication(A::HapTransient)));
+    let pairings = PinPairings::new(std::sync::Arc::new(MemoryStore::default()));
+    let err = Client::begin_pairing(&device(HOMEPOD), &pairings).unwrap_err();
+    assert_eq!(err.downcast_ref::<SessionError>(), Some(&SessionError::UnsupportedAuthentication(A::HapTransient)));
+}
+
+#[test]
+fn pin_source_follows_advertised_pairing_status() {
+    assert!(parse_txt_record(&txt(APPLE_TV, &[])).displays_pin());
+    assert!(parse_txt_record(&txt(APPLE_TV, &["flags=0x4c"])).displays_pin());
+    assert!(!parse_txt_record(&txt(APPLE_TV, &["flags=0x44"])).displays_pin());
 }
