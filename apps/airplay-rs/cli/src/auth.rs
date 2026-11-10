@@ -98,7 +98,7 @@ pub struct Cli<'a> {
     pub json: bool,
 }
 
-fn clean(name: &str) -> String {
+pub fn clean(name: &str) -> String {
     name.replace("\\ ", " ").replace("\\(", "(").replace("\\)", ")")
 }
 
@@ -118,7 +118,7 @@ pub fn select<'d>(devices: &'d [Device], query: &str) -> Result<&'d Device> {
     }
 }
 
-fn auth_label(auth: &AuthRequirement) -> &'static str {
+pub fn auth_label(auth: &AuthRequirement) -> &'static str {
     match auth {
         AuthRequirement::None => "none",
         AuthRequirement::Password => "password",
@@ -131,11 +131,11 @@ fn auth_label(auth: &AuthRequirement) -> &'static str {
     }
 }
 
-fn method_label(method: AuthMethod) -> String {
+pub fn method_label(method: AuthMethod) -> String {
     serde_json::to_value(method).ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default()
 }
 
-fn pairing_error(e: &anyhow::Error) -> Option<&PairingError> {
+pub fn pairing_error(e: &anyhow::Error) -> Option<&PairingError> {
     e.chain().find_map(|c| c.downcast_ref::<PairingError>())
 }
 
@@ -328,13 +328,13 @@ impl Cli<'_> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use airplay_core::pairing::{FileStore, Identity, PairingRecord};
     use airplay_core::protocol::{FeatureFlags, TxtRecord, STATUS_PASSWORD_REQUIRED, STATUS_PIN_REQUIRED};
     use std::time::Instant;
 
-    fn device(id: &str, name: &str, model: &str, flags: u64) -> Device {
+    pub(crate) fn device(id: &str, name: &str, model: &str, flags: u64) -> Device {
         Device {
             name: name.into(),
             host: format!("{id}.local"),
@@ -353,15 +353,15 @@ mod tests {
         }
     }
 
-    fn apple_tv(id: &str, name: &str) -> Device {
+    pub(crate) fn apple_tv(id: &str, name: &str) -> Device {
         device(id, name, "AppleTV14,1", STATUS_PIN_REQUIRED)
     }
 
-    struct Fake<'s> {
-        devices: Vec<Device>,
-        store: &'s dyn CredentialStore,
-        log: Arc<std::sync::Mutex<Vec<String>>>,
-        verify_error: Option<PairingError>,
+    pub(crate) struct Fake<'s> {
+        pub(crate) devices: Vec<Device>,
+        pub(crate) store: &'s dyn CredentialStore,
+        pub(crate) log: Arc<std::sync::Mutex<Vec<String>>>,
+        pub(crate) verify_error: Option<PairingError>,
     }
 
     impl Backend for Fake<'_> {
@@ -384,7 +384,7 @@ mod tests {
                 id: "c1".into(),
                 receiver_id: dev.record.device_id.clone(),
                 source: PinSource::OnScreen,
-                expires_at: Instant::now(),
+                expires_at: Instant::now() + Duration::from_secs(120),
             })
         }
         fn respond(&mut self, c: &PinChallenge, code: &str) -> Result<()> {
@@ -397,7 +397,7 @@ mod tests {
         }
     }
 
-    fn record(id: &str, method: AuthMethod, password: Option<&str>) -> PairingRecord {
+    pub(crate) fn record(id: &str, method: AuthMethod, password: Option<&str>) -> PairingRecord {
         PairingRecord {
             method,
             receiver_id: id.into(),
