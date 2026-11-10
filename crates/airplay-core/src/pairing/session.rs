@@ -68,6 +68,8 @@ pub enum PairingError {
     Cancelled,
     #[error("pairing timed out")]
     TimedOut,
+    #[error("receiver pairing proof is invalid; pair again")]
+    ReceiverProofInvalid,
     #[error("{step} error: {}", code.map(|c| format!("code={c} {}", err_code_name(c))).unwrap_or_else(|| "empty error code".into()))]
     Protocol { step: &'static str, code: Option<u8> },
 }

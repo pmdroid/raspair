@@ -5,10 +5,10 @@
 use crate::audio::{self, PcmEncoder};
 use crate::discovery::Device;
 use crate::pairing::{
-    AuthMethod, CredentialStore, FileStore, Identity, PairingError, PairingRecord, PairingSession, PinChallenge, PinPairings,
-    PinSource, StoreError, Stored,
+    AuthMethod, CredentialStore, FileStore, Identity, LegacyPairing, PairingError, PairingRecord, PairingSession,
+    PinChallenge, PinPairings, PinSource, StoreError, Stored,
 };
-use crate::protocol::{AuthRequirement, HapPairing, Route};
+use crate::protocol::{AuthRequirement, HapPairing, PairingMethod, Route};
 use crate::rtsp::request::AuthError;
 use crate::rtsp::{setup, Client as RtspClient, Method, Request};
 use crate::stream::{self, BufferedStream, RealtimeStream, TimingServer};
@@ -126,12 +126,14 @@ fn duration_env(name: &str, default_ms: u64) -> Duration {
 enum Access {
     Rtsp { password: bool },
     Hap(HapPairing),
+    Legacy,
 }
 
 fn access(route: &Route) -> Result<Access, crate::session::SessionError> {
     match route.auth {
         AuthRequirement::None => Ok(Access::Rtsp { password: false }),
         AuthRequirement::Password => Ok(Access::Rtsp { password: true }),
+        AuthRequirement::LegacyPin => Ok(Access::Legacy),
         _ => route.hap_pairing().map(Access::Hap),
     }
 }
@@ -327,28 +329,44 @@ impl Client {
 
     pub fn pair_with_store(dev: &Device, pin: &str, store: &dyn CredentialStore) -> Result<()> {
         let route = dev.route();
-        if route.hap_pairing()? != HapPairing::Persistent {
+        let method = route.pairing_method()?;
+        if method == PairingMethod::HapTransient {
             return Err(crate::session::SessionError::UnsupportedAuthentication(route.auth).into());
         }
         let addr = dev.ip().ok_or_else(|| anyhow!("no IP address for device"))?;
         let mut rtsp = RtspClient::connect(&addr, dev.port).context("RTSP connect")?;
         let mut session = PairingSession::new(&dev.record.device_id, pin);
         session.load_or_create_identity(store)?;
-        session.pair_apple_tv(&mut rtsp).context("pair-setup")?;
-        let record = session.pairing_record().ok_or_else(|| anyhow!("pair-setup returned no accessory identity"))?;
+        let record = if method == PairingMethod::LegacyPin {
+            let identity = session.identity.clone().expect("identity loaded");
+            LegacyPairing::begin(&dev.record.device_id, identity, &mut rtsp)
+                .and_then(|legacy| legacy.finish(&mut rtsp, pin))
+                .context("pair-setup-pin")?
+        } else {
+            session.pair_apple_tv(&mut rtsp).context("pair-setup")?;
+            session.pairing_record().ok_or_else(|| anyhow!("pair-setup returned no accessory identity"))?
+        };
         store.save(&record).context("save pairing")?;
         Ok(())
     }
 
     pub fn begin_pairing(dev: &Device, pairings: &PinPairings) -> Result<PinChallenge> {
         let route = dev.route();
-        if route.hap_pairing()? != HapPairing::Persistent {
+        let method = route.pairing_method()?;
+        if method == PairingMethod::HapTransient {
             return Err(crate::session::SessionError::UnsupportedAuthentication(route.auth).into());
         }
         let addr = dev.ip().ok_or_else(|| anyhow!("no IP address for device"))?;
         let rtsp = RtspClient::connect(&addr, dev.port).context("RTSP connect")?;
-        let source = if dev.record.displays_pin() { PinSource::OnScreen } else { PinSource::Static };
-        Ok(pairings.begin(&dev.record.device_id, source, Box::new(rtsp))?)
+        let source = if dev.record.displays_pin() || method == PairingMethod::LegacyPin {
+            PinSource::OnScreen
+        } else {
+            PinSource::Static
+        };
+        Ok(match method {
+            PairingMethod::LegacyPin => pairings.begin_legacy(&dev.record.device_id, source, Box::new(rtsp))?,
+            _ => pairings.begin(&dev.record.device_id, source, Box::new(rtsp))?,
+        })
     }
 
     /// Dial the receiver, authenticate on that connection (transient
@@ -381,6 +399,12 @@ impl Client {
             self.shared_secret = session.shared_secret.clone();
         } else {
             match self.credential_store()?.load(&dev.record.device_id) {
+                Ok(Stored::Paired(record)) if access == Access::Legacy => {
+                    self.shared_secret = crate::pairing::legacy::verify(&record, &mut rtsp).context("pair-verify")?;
+                }
+                Ok(Stored::Paired(record)) if record.method == AuthMethod::LegacyPin => {
+                    return Err(PairingError::InvalidRecord.into())
+                }
                 Ok(Stored::Paired(record)) => session.use_record(&record),
                 Ok(Stored::Missing) => return Err(PairingError::NotPaired.into()),
                 Ok(Stored::RePairRequired { .. }) => return Err(PairingError::LegacyKeyOnly.into()),
@@ -389,8 +413,10 @@ impl Client {
                 ) => return Err(PairingError::InvalidRecord.into()),
                 Err(e) => return Err(e.into()),
             }
-            session.pair_verify(&mut rtsp).context("pair-verify")?;
-            self.shared_secret = session.shared_secret.clone();
+            if access == Access::Hap(HapPairing::Persistent) {
+                session.pair_verify(&mut rtsp).context("pair-verify")?;
+                self.shared_secret = session.shared_secret.clone();
+            }
         }
 
         if let Access::Hap(_) = access {

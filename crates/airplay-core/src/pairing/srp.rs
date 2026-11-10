@@ -25,10 +25,12 @@ pub struct SrpGroup {
 pub const HAP_GROUP: SrpGroup = SrpGroup { n_hex: N_HEX, g: 5, bytes: GROUP_BYTES, hash: h, apple_variant: false };
 pub const LEGACY_GROUP: SrpGroup = SrpGroup { n_hex: N_2048_HEX, g: 2, bytes: 256, hash: h1, apple_variant: true };
 
+#[cfg(test)]
 pub(super) fn modulus() -> BigUint {
     BigUint::parse_bytes(N_HEX.as_bytes(), 16).expect("valid N hex")
 }
 
+#[cfg(test)]
 pub(super) fn generator() -> BigUint {
     BigUint::from(5u32)
 }
@@ -71,6 +73,7 @@ fn mod_sub(a: &BigUint, b: &BigUint, n: &BigUint) -> BigUint {
 }
 
 // k = H(N | PAD(g)) per RFC 5054; g padded to the modulus length.
+#[cfg(test)]
 pub(super) fn compute_k(n: &BigUint, g: &BigUint) -> BigUint {
     let digest = h(&[&n.to_bytes_be(), &padded_bytes(g, GROUP_BYTES)]);
     BigUint::from_bytes_be(&digest)

@@ -1,3 +1,4 @@
+use super::legacy::LegacyPairing;
 use super::session::{PairTransport, PairingError, PairingSession};
 use super::store::CredentialStore;
 use num_bigint::BigUint;
@@ -56,12 +57,15 @@ impl PinPairingError {
     }
 }
 
+enum Exchange {
+    Hap { session: Box<PairingSession>, salt: Vec<u8>, b: BigUint },
+    Legacy(Box<LegacyPairing>),
+}
+
 struct Pending {
     receiver_id: String,
-    session: PairingSession,
+    exchange: Exchange,
     transport: Box<dyn PairTransport + Send>,
-    salt: Vec<u8>,
-    b: BigUint,
     expires_at: Instant,
 }
 
@@ -129,7 +133,26 @@ impl PinPairings {
         &self,
         receiver_id: &str,
         source: PinSource,
+        transport: Box<dyn PairTransport + Send>,
+    ) -> Result<PinChallenge, PinPairingError> {
+        self.start(receiver_id, source, transport, false)
+    }
+
+    pub fn begin_legacy(
+        &self,
+        receiver_id: &str,
+        source: PinSource,
+        transport: Box<dyn PairTransport + Send>,
+    ) -> Result<PinChallenge, PinPairingError> {
+        self.start(receiver_id, source, transport, true)
+    }
+
+    fn start(
+        &self,
+        receiver_id: &str,
+        source: PinSource,
         mut transport: Box<dyn PairTransport + Send>,
+        legacy: bool,
     ) -> Result<PinChallenge, PinPairingError> {
         let id = format!("{:032x}", rand::random::<u128>());
         {
@@ -141,10 +164,14 @@ impl PinPairings {
         let mut session = PairingSession::new(receiver_id, "");
         let started = session
             .load_or_create_identity(&*self.store)
-            .and_then(|_| session.begin_persistent(&mut *transport))
+            .and_then(|_| match legacy {
+                true => LegacyPairing::begin(receiver_id, session.identity.clone().expect("identity loaded"), &mut *transport)
+                    .map(|l| Exchange::Legacy(Box::new(l))),
+                false => session.begin_persistent(&mut *transport).map(|(salt, b)| Exchange::Hap { session: Box::new(session), salt, b }),
+            })
             .map_err(PinPairingError::classify);
         let mut state = self.state();
-        let (salt, b) = match started {
+        let exchange = match started {
             Ok(started) if state.current.get(receiver_id) == Some(&id) => started,
             Ok(_) => return Err(PinPairingError::Cancelled),
             Err(e) => {
@@ -153,7 +180,7 @@ impl PinPairings {
             }
         };
         let expires_at = Instant::now() + self.expiry;
-        let pending = Pending { receiver_id: receiver_id.to_string(), session, transport, salt, b, expires_at };
+        let pending = Pending { receiver_id: receiver_id.to_string(), exchange, transport, expires_at };
         state.slots.insert(id.clone(), Slot::Pending(Box::new(pending)));
         Ok(PinChallenge { id, receiver_id: receiver_id.to_string(), source, expires_at })
     }
@@ -173,17 +200,19 @@ impl PinPairings {
                 None => return Err(PinPairingError::UnknownChallenge),
             }
         };
-        let finished = pending
-            .session
-            .finish_persistent(&mut *pending.transport, &pending.salt, pending.b.clone(), code)
-            .map_err(PinPairingError::classify)
-            .and_then(|_| {
-                pending
-                    .session
-                    .pairing_record()
-                    .filter(|record| record.receiver_id == pending.receiver_id)
-                    .ok_or_else(|| PinPairingError::Failed("pair-setup returned no accessory identity".into()))
-            });
+        let transport = &mut *pending.transport;
+        let finished = match &mut pending.exchange {
+            Exchange::Hap { session, salt, b } => {
+                session.finish_persistent(transport, salt, b.clone(), code).map(|_| session.pairing_record())
+            }
+            Exchange::Legacy(legacy) => legacy.finish(transport, code).map(Some),
+        }
+        .map_err(PinPairingError::classify)
+        .and_then(|record| {
+            record
+                .filter(|record| record.receiver_id == pending.receiver_id)
+                .ok_or_else(|| PinPairingError::Failed("pair-setup returned no accessory identity".into()))
+        });
         let mut state = self.state();
         let current = state.release(id);
         let record = finished?;

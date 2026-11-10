@@ -39,7 +39,7 @@ fixtures pin structure and validation, not bytes.
 | -- | -- | -- | -- | -- | -- |
 | Unauthenticated receivers | PAS-1411 | fixture | n/a | open | fixture + gap |
 | RTSP password / digest | PAS-1411 | fixture | fixture | open | fixture + gap |
-| Legacy PIN / SRP (`/pair-setup-pin`) | PAS-1410 | open | open | open | gap |
+| Legacy PIN / SRP (`/pair-setup-pin`) | PAS-1410 | fixture | fixture | open | fixture + gap |
 | HAP persistent, on-screen PIN | PAS-1409 | fixture | fixture | open | fixture |
 | HAP persistent, static PIN | PAS-1409 | open | open | open | gap |
 | HAP pair-verify after persistent pairing | PAS-1407 | n/a | fixture, unverified in product | open | fixture + gap |
@@ -72,9 +72,14 @@ header. Gap: these choices still need a receiver capture. Reference: [RFC 2617](
 `pk`, `proof` → `proof`), then an AES-GCM `epk`/`authTag` exchange carrying the
 Ed25519 key. SRP is 2048-bit with SHA-1, unlike the HAP 3072-bit SHA-512 group
 in `srp.rs`. Reconnect is `/pair-verify` with a 4-byte header, X25519 and
-Ed25519 keys and an AES-CTR encrypted signature. Gap: no fixture and no
-published vector for the 2048/SHA-1 group; the credential fields to store are
-controller seed, controller id and receiver Ed25519 key.
+Ed25519 keys and an AES-CTR encrypted signature. Covered by fixtures in
+`src/pairing/legacy.rs`: initial PIN pairing, reload and verified reconnect,
+wrong PIN, invalid receiver SRP proof and `epk`, changed receiver key and a
+receiver that forgot the controller. `srp.rs` pins the SHA-1 SRP core and the
+Apple two-hash session key with the RFC 5054 Appendix B vector. Records are
+saved with method `legacy_pin` and hold the controller seed, controller id and
+receiver Ed25519 key. Gap: no hardware result; streaming to a legacy receiver
+needs the RAOP transport (PAS-1436), so `Session::connect` still rejects it.
 
 **HAP persistent, on-screen PIN (PAS-1409).** Covered by fixture. Credential
 fields: controller Ed25519 identity, controller pairing id derived from its
