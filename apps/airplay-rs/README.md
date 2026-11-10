@@ -55,26 +55,26 @@ airplay discover
 # pair an Apple TV (enter the on-screen PIN); HomePods need no pairing
 airplay pair --device "Entertainment Room" --pin 1234
 
-# play a file — "auto" picks buffered when the receiver supports it, else realtime
-airplay play --device "Living Room" --file song.flac
-airplay play --device "Living Room" --file song.flac --mode realtime
+# play files and folders as strict buffered PCM 24-bit/48 kHz; explicit files
+# keep argument order, folders play in natural order (--recursive for subfolders)
+airplay play song.flac ~/Music/Album --device AA:BB:CC:DD:EE:FF
+airplay play --device "Living Room" --file song.flac        # --file still works
 
-# buffered lossless (ALAC); --lossless is shorthand for --mode buffered --format alac48000-24
-airplay play --device "Living Room" --file song.flac --lossless
-airplay play --device "Living Room" --file song.flac --mode buffered --format pcm24-48
+# lossless ALAC instead of PCM; --lossless is shorthand for --codec alac
+airplay play song.flac --device "Living Room" --codec alac
+
+# allow another lossless codec if the receiver rejects the requested one;
+# --json writes one event object per line
+airplay play song.flac --device "Living Room" --fallback alac --json
 
 # a HomePod stereo pair is detected and driven in lockstep automatically;
 # add --no-stereo to play only the named speaker
-airplay play --device "Living Room" --file song.flac --lossless
-
-# entertainment / home-theater group (Apple TV leader + HomePods):
-# build the Doubletake fp-m3 helper first (see docs/ENTERTAINMENT_GROUPS.md)
-airplay play --device "Entertainment Room" --file song.flac --group \
-             --fairplay-helper ./bin/fp-m3
+airplay play song.flac --device "Living Room" --no-stereo
 ```
 
-Formats: `aac44100`, `aac48000`, `pcm24-48`, `pcm24-48be`, `alac48000-24`.
-Lossless = `pcm24-48` / `pcm24-48be` / `alac48000-24` (or just `--lossless`).
+Codecs: `pcm`, `pcm-be`, `alac` (legacy `--format pcm24-48|pcm24-48be|alac48000-24`
+is accepted). Exit status: 2 pairing required, 3 unsupported profile, 64 invalid
+invocation, 130 cancelled with Ctrl-C, 1 playback failure.
 
 ### Notes
 
