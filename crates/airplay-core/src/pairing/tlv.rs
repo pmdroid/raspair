@@ -10,6 +10,7 @@ pub const TLV_PROOF: u8 = 0x04;
 pub const TLV_ENCRYPTED_DATA: u8 = 0x05;
 pub const TLV_STATE: u8 = 0x06;
 pub const TLV_ERROR: u8 = 0x07;
+pub const TLV_RETRY_DELAY: u8 = 0x08;
 pub const TLV_SIGNATURE: u8 = 0x0A;
 pub const TLV_FLAGS: u8 = 0x13;
 

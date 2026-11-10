@@ -1,7 +1,7 @@
 use super::challenge::{PinPairingError, PinPairings, PinSource, DEFAULT_CHALLENGE_EXPIRY};
 use super::crypto::{chacha20poly1305_decrypt, chacha20poly1305_encrypt, hkdf_expand, nonce_from_string};
 use super::identity::{self, Identity};
-use super::store::{CredentialStore, FileStore, MemoryStore, PairingRecord, Stored};
+use super::store::{AuthMethod, CredentialStore, FileStore, MemoryStore, PairingRecord, Stored};
 use super::session::{PairTransport, PairingError, PairingSession, HOMEPOD_PIN};
 use super::srp::{compute_k, generator, h, modulus, padded_bytes, GROUP_BYTES};
 use super::tlv::{self, TlvItem};
@@ -51,6 +51,8 @@ struct SyntheticReceiver {
     verify_key: Vec<u8>,
     tamper_verify_sig: bool,
     fail_setup: Option<(u8, u8)>,
+    setup_error: Option<Vec<u8>>,
+    on_post: Option<Box<dyn FnMut() + Send>>,
 }
 
 impl SyntheticReceiver {
@@ -78,6 +80,8 @@ impl SyntheticReceiver {
             verify_key: Vec::new(),
             tamper_verify_sig: false,
             fail_setup: None,
+            setup_error: None,
+            on_post: None,
         }
     }
 
@@ -214,6 +218,12 @@ impl PairTransport for SyntheticReceiver {
                 ]));
             }
         }
+        if let Some(f) = self.on_post.as_mut() {
+            f();
+        }
+        if let (Some(err), "/pair-setup") = (&self.setup_error, path) {
+            return Ok(err.clone());
+        }
         match (path, first(tlv::TLV_STATE)) {
             ("/pair-pin-start", None) => Ok(Vec::new()),
             ("/pair-setup", Some(0x01)) => Ok(self.setup_m2()),
@@ -255,7 +265,7 @@ fn steps(list: &[(&str, Option<u8>)]) -> Vec<(String, Option<u8>)> {
 
 const STARTED: &[(&str, Option<u8>)] = &[("/pair-pin-start", None), ("/pair-setup", Some(0x01))];
 
-fn saved(store: &MemoryStore) -> Option<([u8; 32], [u8; 32])> {
+fn saved(store: &MemoryStore) -> Option<([u8; 32], Option<[u8; 32]>)> {
     match store.load(SYNTHETIC_RECEIVER_ID).unwrap() {
         Stored::Paired(r) => Some((r.controller_key.seed(), r.accessory_public_key)),
         _ => None,
@@ -368,7 +378,7 @@ fn persistent_pin_transcript_separates_pair_success_and_verified_reconnect() {
     let store = MemoryStore::default();
     store.save(&session.pairing_record().unwrap()).unwrap();
     let Stored::Paired(record) = store.load(SYNTHETIC_RECEIVER_ID).unwrap() else { panic!("record not saved") };
-    assert_eq!(record.accessory_public_key.to_vec(), receiver.accessory_ltpk());
+    assert_eq!(record.accessory_public_key.unwrap().to_vec(), receiver.accessory_ltpk());
     assert_eq!(record.controller_key.public_key(), controller.public_key());
 
     receiver.transcript.clear();
@@ -435,7 +445,7 @@ fn reconnect_rejects_receiver_signing_with_a_different_key() {
 #[test]
 fn reconnect_rejects_wrong_trusted_key_in_record() {
     let (mut receiver, mut record) = paired_record();
-    record.accessory_public_key = SigningKey::from_bytes(&SYNTHETIC_IMPOSTOR_SEED).verifying_key().to_bytes();
+    record.accessory_public_key = Some(SigningKey::from_bytes(&SYNTHETIC_IMPOSTOR_SEED).verifying_key().to_bytes());
     assert_eq!(rejected(&mut receiver, &record), PairingError::SignatureInvalid);
     assert_eq!(receiver.transcript.len(), 1);
 }
@@ -459,7 +469,7 @@ fn reconnect_rejects_tampered_signature() {
 #[test]
 fn reconnect_without_trusted_key_fails_before_contacting_receiver() {
     let (mut receiver, record) = paired_record();
-    for (ltpk, id) in [(Vec::new(), record.accessory_id.clone()), (vec![0u8; 31], record.accessory_id.clone()), (record.accessory_public_key.to_vec(), String::new())] {
+    for (ltpk, id) in [(Vec::new(), record.accessory_id.clone()), (vec![0u8; 31], record.accessory_id.clone()), (record.accessory_public_key.unwrap().to_vec(), String::new())] {
         let mut session = PairingSession::new(SYNTHETIC_RECEIVER_ID, SYNTHETIC_PIN);
         session.identity = Some(record.controller_key.clone());
         session.server_ltpk = ltpk;
@@ -528,7 +538,7 @@ fn pin_challenge_starts_before_prompt_and_answer_resumes_its_own_session() {
     expected.extend([("/pair-setup", Some(0x03)), ("/pair-setup", Some(0x05))]);
     assert_eq!(first.paths(), steps(&expected));
     assert_eq!(other.paths(), steps(STARTED));
-    assert_eq!(saved(&store).unwrap().1.to_vec(), first.0.lock().unwrap().accessory_ltpk());
+    assert_eq!(saved(&store).unwrap().1.unwrap().to_vec(), first.0.lock().unwrap().accessory_ltpk());
     assert!(matches!(store.load("fixture-other").unwrap(), Stored::Missing));
     pairings.respond(&second.id, "4321").unwrap();
     assert!(matches!(store.load("fixture-other").unwrap(), Stored::Paired(_)));
@@ -620,8 +630,141 @@ fn fresh_process_pair_verify_uses_trust_from_answered_challenge() {
     }
     let Stored::Paired(record) = FileStore::new(&tmp.0).load(SYNTHETIC_RECEIVER_ID).unwrap() else { panic!("not saved") };
     let mut receiver = Arc::try_unwrap(receiver.0).ok().unwrap().into_inner().unwrap();
-    assert_eq!(record.accessory_public_key.to_vec(), receiver.accessory_ltpk());
+    assert_eq!(record.accessory_public_key.unwrap().to_vec(), receiver.accessory_ltpk());
     receiver.transcript.clear();
     assert_eq!(reconnect(&mut receiver, &record).unwrap(), Proven::VerifiedReconnect);
     assert_eq!(receiver.paths(), vec![("/pair-verify", Some(0x01)), ("/pair-verify", Some(0x03))]);
+}
+
+const SYNTHETIC_PASSWORD: &str = "correct horse";
+
+fn transient_password(receiver: &mut SyntheticReceiver, supplied: Option<&str>, store: &dyn CredentialStore) -> (PairingSession, Result<()>) {
+    let mut session = PairingSession::new(SYNTHETIC_RECEIVER_ID, "1234");
+    let result = session.pair_transient_password(receiver, supplied, store);
+    assert_eq!(session.pin, "1234");
+    (session, result)
+}
+
+fn typed(result: Result<()>) -> PairingError {
+    result.unwrap_err().downcast_ref::<PairingError>().cloned().expect("typed pairing error")
+}
+
+#[test]
+fn default_transient_keeps_supplied_password_untouched() {
+    let mut receiver = SyntheticReceiver::new(HOMEPOD_PIN);
+    let mut session = PairingSession::new(SYNTHETIC_RECEIVER_ID, SYNTHETIC_PASSWORD);
+    session.pair_homepod(&mut receiver).unwrap();
+    assert_eq!(session.pin, SYNTHETIC_PASSWORD);
+    assert_eq!(session.shared_secret, receiver.srp_key);
+}
+
+#[test]
+fn protected_transient_pairs_with_supplied_password_and_saves_it_after_success() {
+    let mut receiver = SyntheticReceiver::new(SYNTHETIC_PASSWORD);
+    let store = MemoryStore::default();
+    let (session, result) = transient_password(&mut receiver, Some(SYNTHETIC_PASSWORD), &store);
+    result.unwrap();
+    assert_eq!(receiver.paths(), vec![("/pair-setup", Some(0x01)), ("/pair-setup", Some(0x03))]);
+    assert!(receiver.transcript.iter().all(|e| e.hkp == "4"));
+    assert_eq!(receiver.transcript[0].flags, Some(0x10));
+    assert_eq!(session.shared_secret, receiver.srp_key);
+    assert!(session.pairing_record().is_none());
+    let Stored::Paired(record) = store.load(SYNTHETIC_RECEIVER_ID).unwrap() else { panic!("password not saved") };
+    assert_eq!(record.method, AuthMethod::Password);
+    assert_eq!(record.password.as_deref(), Some(SYNTHETIC_PASSWORD));
+    assert!(record.accessory_public_key.is_none());
+    assert!(!format!("{record:?}").contains(SYNTHETIC_PASSWORD));
+}
+
+#[test]
+fn protected_transient_without_password_emits_challenge_before_contacting_receiver() {
+    let mut receiver = SyntheticReceiver::new(SYNTHETIC_PASSWORD);
+    let store = MemoryStore::default();
+    for supplied in [None, Some("")] {
+        let (session, result) = transient_password(&mut receiver, supplied, &store);
+        assert_eq!(typed(result), PairingError::PasswordRequired);
+        assert!(session.shared_secret.is_empty());
+    }
+    assert!(receiver.transcript.is_empty());
+}
+
+#[test]
+fn wrong_password_fails_once_without_default_fallback_or_saving() {
+    let mut receiver = SyntheticReceiver::new(SYNTHETIC_PASSWORD);
+    let store = MemoryStore::default();
+    let (session, result) = transient_password(&mut receiver, Some("wrong"), &store);
+    let err = typed(result);
+    assert_eq!(err, PairingError::WrongPassword);
+    assert!(!err.requires_re_pair());
+    assert_eq!(receiver.paths(), vec![("/pair-setup", Some(0x01)), ("/pair-setup", Some(0x03))]);
+    assert!(session.shared_secret.is_empty() && session.session_key.is_empty());
+    assert!(matches!(store.load(SYNTHETIC_RECEIVER_ID).unwrap(), Stored::Missing));
+}
+
+#[test]
+fn receiver_errors_are_typed_and_never_retried() {
+    let error = |code: u8, extra: &[TlvItem]| {
+        let mut items = vec![TlvItem::new(tlv::TLV_STATE, vec![0x02]), TlvItem::new(tlv::TLV_ERROR, vec![code])];
+        items.extend_from_slice(extra);
+        tlv::encode(&items)
+    };
+    let cases = [
+        (error(0x03, &[TlvItem::new(tlv::TLV_RETRY_DELAY, vec![0x2C, 0x01])]), PairingError::Backoff { retry_after: Some(std::time::Duration::from_secs(300)) }),
+        (error(0x03, &[]), PairingError::Backoff { retry_after: None }),
+        (error(0x05, &[]), PairingError::AttemptsExhausted),
+        (error(0x06, &[]), PairingError::Unavailable),
+    ];
+    for (reply, expected) in cases {
+        let mut receiver = SyntheticReceiver::new(SYNTHETIC_PASSWORD);
+        receiver.setup_error = Some(reply);
+        let store = MemoryStore::default();
+        let (_, result) = transient_password(&mut receiver, Some(SYNTHETIC_PASSWORD), &store);
+        assert_eq!(typed(result), expected);
+        assert_eq!(receiver.transcript.len(), 1);
+        assert!(matches!(store.load(SYNTHETIC_RECEIVER_ID).unwrap(), Stored::Missing));
+    }
+    let mut receiver = SyntheticReceiver::new(HOMEPOD_PIN);
+    receiver.setup_error = Some(error(0x06, &[]));
+    assert_eq!(typed(PairingSession::new(SYNTHETIC_RECEIVER_ID, "").pair_homepod(&mut receiver)), PairingError::Unavailable);
+    assert_eq!(receiver.transcript.len(), 1);
+}
+
+#[test]
+fn cancellation_and_deadline_stop_the_exchange_between_messages() {
+    let cancel = crate::session::Cancellation::default();
+    let mut receiver = SyntheticReceiver::new(HOMEPOD_PIN);
+    let trigger = cancel.clone();
+    receiver.on_post = Some(Box::new(move || trigger.cancel()));
+    let mut session = PairingSession::new(SYNTHETIC_RECEIVER_ID, "");
+    session.deadline = Some((std::time::Instant::now() + std::time::Duration::from_secs(60), cancel));
+    assert_eq!(typed(session.pair_homepod(&mut receiver)), PairingError::Cancelled);
+    assert_eq!(receiver.transcript.len(), 1);
+    assert!(session.shared_secret.is_empty());
+
+    let mut receiver = SyntheticReceiver::new(HOMEPOD_PIN);
+    let mut session = PairingSession::new(SYNTHETIC_RECEIVER_ID, "");
+    session.deadline = Some((std::time::Instant::now(), Default::default()));
+    assert_eq!(typed(session.pair_homepod(&mut receiver)), PairingError::TimedOut);
+    assert!(receiver.transcript.is_empty());
+}
+
+#[test]
+fn restart_reuses_saved_password_with_fresh_transient_session_keys() {
+    let tmp = TempDir::new();
+    let mut receiver = SyntheticReceiver::new(SYNTHETIC_PASSWORD);
+    let first = {
+        let (session, result) = transient_password(&mut receiver, Some(SYNTHETIC_PASSWORD), &FileStore::new(&tmp.0));
+        result.unwrap();
+        session.shared_secret
+    };
+    let saved = std::fs::read_dir(&tmp.0).unwrap().map(|e| std::fs::read(e.unwrap().path()).unwrap()).collect::<Vec<_>>();
+    receiver.transcript.clear();
+    let (session, result) = transient_password(&mut receiver, None, &FileStore::new(&tmp.0));
+    result.unwrap();
+    assert_eq!(receiver.paths(), vec![("/pair-setup", Some(0x01)), ("/pair-setup", Some(0x03))]);
+    assert_eq!(session.shared_secret, receiver.srp_key);
+    assert_ne!(session.shared_secret, first);
+    let after = std::fs::read_dir(&tmp.0).unwrap().map(|e| std::fs::read(e.unwrap().path()).unwrap()).collect::<Vec<_>>();
+    assert_eq!(saved, after);
+    assert!(saved.iter().all(|f| !String::from_utf8_lossy(f).contains("srp") && !String::from_utf8_lossy(f).contains(&hex::encode(&first))));
 }

@@ -35,7 +35,7 @@ fn raop_and_airplay_sightings_merge_by_receiver_id() {
         }
         assert_eq!(devices.len(), 1);
         assert_eq!(devices[0].port, 7000);
-        assert_eq!(devices[0].route().auth, AuthRequirement::Password);
+        assert_eq!(devices[0].route().auth, AuthRequirement::HapTransientPassword);
         let expected = if raop_first { [10, 0, 0, 5] } else { [10, 0, 0, 6] };
         assert_eq!(devices[0].ipv4, Some(Ipv4Addr::from(expected)));
     }

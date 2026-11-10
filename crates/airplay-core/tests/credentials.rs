@@ -27,7 +27,7 @@ fn record(id: &str) -> PairingRecord {
         controller_id: "controller".into(),
         accessory_id: "accessory".into(),
         controller_key: Identity::generate(),
-        accessory_public_key: Identity::generate().public_key(),
+        accessory_public_key: Some(Identity::generate().public_key()),
         password: None,
     }
 }

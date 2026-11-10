@@ -11,10 +11,12 @@ use super::identity::{self, Identity};
 use super::store::{AuthMethod, CredentialStore, PairingRecord, Stored};
 use super::srp::{padded_bytes, SrpClient};
 use super::tlv::{self, TlvItem};
+use crate::session::Cancellation;
 use anyhow::{anyhow, bail, Context, Result};
 use num_bigint::BigUint;
+use std::time::{Duration, Instant};
 
-pub const HOMEPOD_PIN: &str = "3939";
+pub use crate::protocol::HOMEPOD_PIN;
 
 const METHOD_PAIR_SETUP: u8 = 0x00;
 const STATE_M1: u8 = 0x01;
@@ -52,6 +54,20 @@ pub enum PairingError {
     AccessoryIdMismatch,
     #[error("receiver signature does not match the saved pairing; pair again")]
     SignatureInvalid,
+    #[error("receiver requires a password")]
+    PasswordRequired,
+    #[error("receiver rejected the password")]
+    WrongPassword,
+    #[error("receiver is backing off pairing attempts")]
+    Backoff { retry_after: Option<Duration> },
+    #[error("receiver pairing attempt limit reached")]
+    AttemptsExhausted,
+    #[error("receiver is unavailable for pairing")]
+    Unavailable,
+    #[error("pairing cancelled")]
+    Cancelled,
+    #[error("pairing timed out")]
+    TimedOut,
     #[error("{step} error: {}", code.map(|c| format!("code={c} {}", err_code_name(c))).unwrap_or_else(|| "empty error code".into()))]
     Protocol { step: &'static str, code: Option<u8> },
 }
@@ -60,16 +76,29 @@ impl PairingError {
     pub fn requires_re_pair(&self) -> bool {
         match self {
             PairingError::Protocol { step, code } => step.starts_with("pair-verify") && *code == Some(0x02),
+            PairingError::WrongPassword
+            | PairingError::Backoff { .. }
+            | PairingError::AttemptsExhausted
+            | PairingError::Unavailable
+            | PairingError::Cancelled
+            | PairingError::TimedOut => false,
             _ => true,
         }
     }
 }
 
 fn check_error(items: &[TlvItem], step: &'static str) -> Result<(), PairingError> {
-    match tlv::get(items, tlv::TLV_ERROR) {
-        Some(e) => Err(PairingError::Protocol { step, code: e.first().copied() }),
-        None => Ok(()),
-    }
+    let Some(e) = tlv::get(items, tlv::TLV_ERROR) else { return Ok(()) };
+    Err(match e.first().copied() {
+        Some(0x03) => PairingError::Backoff {
+            retry_after: tlv::get(items, tlv::TLV_RETRY_DELAY)
+                .filter(|d| !d.is_empty() && d.len() <= 8)
+                .map(|d| Duration::from_secs(d.iter().rev().fold(0u64, |acc, b| acc << 8 | *b as u64))),
+        },
+        Some(0x05) => PairingError::AttemptsExhausted,
+        Some(0x06) => PairingError::Unavailable,
+        code => PairingError::Protocol { step, code },
+    })
 }
 
 /// Posts one pairing message and returns the response body. The RTSP client
@@ -88,6 +117,7 @@ pub struct PairingSession {
     pub server_ltpk: Vec<u8>,
     pub accessory_id: String,
     pub shared_secret: Vec<u8>,
+    pub deadline: Option<(Instant, Cancellation)>,
     srp: Option<SrpClient>,
 }
 
@@ -102,6 +132,7 @@ impl PairingSession {
             server_ltpk: Vec::new(),
             accessory_id: String::new(),
             shared_secret: Vec::new(),
+            deadline: None,
             srp: None,
         }
     }
@@ -115,13 +146,22 @@ impl PairingSession {
     }
 
     fn post(&self, t: &mut dyn PairTransport, path: &str, body: &[u8]) -> Result<Vec<u8>> {
+        if let Some((end, cancel)) = &self.deadline {
+            if cancel.is_cancelled() {
+                return Err(PairingError::Cancelled.into());
+            }
+            if Instant::now() >= *end {
+                return Err(PairingError::TimedOut.into());
+            }
+        }
         let headers = vec![("X-Apple-HKP".to_string(), self.hkp_header().to_string())];
         t.post(path, &headers, body)
     }
 
     pub fn load_or_create_identity(&mut self, store: &dyn CredentialStore) -> Result<()> {
         self.identity = Some(match store.load(&self.device_id)? {
-            Stored::Paired(record) => record.controller_key,
+            Stored::Paired(record) if record.method == AuthMethod::PairSetupPin => record.controller_key,
+            Stored::Paired(_) => Identity::generate(),
             Stored::Missing | Stored::RePairRequired { .. } => Identity::generate(),
         });
         Ok(())
@@ -129,7 +169,7 @@ impl PairingSession {
 
     pub fn use_record(&mut self, record: &PairingRecord) {
         self.identity = Some(record.controller_key.clone());
-        self.server_ltpk = record.accessory_public_key.to_vec();
+        self.server_ltpk = record.accessory_public_key.map(|k| k.to_vec()).unwrap_or_default();
         self.accessory_id = record.accessory_id.clone();
     }
 
@@ -143,7 +183,7 @@ impl PairingSession {
             controller_id: String::from_utf8(self.controller_pairing_id()).ok()?,
             accessory_id: self.accessory_id.clone(),
             controller_key: self.identity.clone()?,
-            accessory_public_key: self.server_ltpk.as_slice().try_into().ok()?,
+            accessory_public_key: Some(self.server_ltpk.as_slice().try_into().ok()?),
             password: None,
         })
     }
@@ -315,10 +355,52 @@ impl PairingSession {
 
     /// Transient pair-setup for a HomePod (fixed PIN, no saved identity).
     pub fn pair_homepod(&mut self, t: &mut dyn PairTransport) -> Result<()> {
+        self.pair_transient(t, HOMEPOD_PIN)
+    }
+
+    fn pair_transient(&mut self, t: &mut dyn PairTransport, password: &str) -> Result<()> {
         self.is_transient = true;
-        self.pin = HOMEPOD_PIN.to_string();
+        self.session_key.clear();
+        self.shared_secret.clear();
         let (salt, b) = self.pair_setup_phase1(t)?;
-        self.pair_setup_phase2(t, &salt, b, HOMEPOD_PIN)
+        let result = self.pair_setup_phase2(t, &salt, b, password);
+        self.srp = None;
+        result
+    }
+
+    pub fn pair_transient_password(
+        &mut self,
+        t: &mut dyn PairTransport,
+        supplied: Option<&str>,
+        store: &dyn CredentialStore,
+    ) -> Result<()> {
+        let saved = match store.load(&self.device_id)? {
+            Stored::Paired(r) if r.method == AuthMethod::Password => r.password,
+            _ => None,
+        };
+        let password = supplied
+            .filter(|p| !p.is_empty())
+            .or(saved.as_deref())
+            .ok_or(PairingError::PasswordRequired)?
+            .to_string();
+        self.identity = None;
+        self.pair_transient(t, &password).map_err(|e| match e.downcast_ref::<PairingError>() {
+            Some(PairingError::Protocol { step: "M4", code: Some(0x02) }) => PairingError::WrongPassword.into(),
+            _ => e,
+        })?;
+        if saved.as_deref() != Some(password.as_str()) {
+            let controller_key = self.identity.clone().ok_or_else(|| anyhow!("transient identity missing"))?;
+            store.save(&PairingRecord {
+                method: AuthMethod::Password,
+                receiver_id: self.device_id.clone(),
+                controller_id: String::from_utf8(self.controller_pairing_id())?,
+                accessory_id: String::new(),
+                controller_key,
+                accessory_public_key: None,
+                password: Some(password),
+            })?;
+        }
+        Ok(())
     }
 
     /// pair-verify using a previously saved identity. Derives the channel

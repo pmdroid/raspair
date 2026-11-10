@@ -45,7 +45,11 @@ impl PinPairingError {
     fn classify(error: anyhow::Error) -> Self {
         match error.downcast_ref::<PairingError>() {
             Some(PairingError::Protocol { code: Some(0x02), .. }) => Self::WrongCode,
-            Some(PairingError::Protocol { code: Some(0x03 | 0x05), .. }) => Self::Backoff,
+            Some(
+                PairingError::Protocol { code: Some(0x03 | 0x05), .. }
+                | PairingError::Backoff { .. }
+                | PairingError::AttemptsExhausted,
+            ) => Self::Backoff,
             Some(PairingError::Protocol { code: Some(0x04), .. }) => Self::MaxPeers,
             _ => Self::Failed(format!("{error:#}")),
         }
