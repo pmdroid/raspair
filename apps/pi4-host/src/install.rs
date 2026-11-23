@@ -9,11 +9,13 @@ pub const TLS: &str = "/etc/vinyl-bridge/tls";
 pub const CERT: &str = "/etc/vinyl-bridge/tls/cert.pem";
 pub const KEY: &str = "/etc/vinyl-bridge/tls/key.pem";
 pub const UNIT: &str = "/etc/systemd/system/vinyl-bridge.service";
+pub const HELPER_UNIT: &str = "/etc/systemd/system/vinyl-bridge-helper.service";
 pub const STATE: &str = "/var/lib/vinyl-bridge";
 pub const REC: &str = "/var/lib/vinyl-bridge/rec";
 pub const CREDENTIAL: &str = "/var/lib/vinyl-bridge/setup-credential";
 
 const UNIT_TEXT: &str = include_str!("../deploy/systemd/vinyl-bridge.service");
+const HELPER_UNIT_TEXT: &str = include_str!("../deploy/systemd/vinyl-bridge-helper.service");
 const CONFIG_TEXT: &str = include_str!("../config.example.toml");
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -60,6 +62,7 @@ pub fn install(sys: &mut dyn System, exe: &[u8]) -> Result<Outcome> {
     sys.set_owner(Path::new(CERT), 0o644, Owner::Root)?;
     sys.set_owner(Path::new(KEY), 0o640, Owner::RootServiceGroup)?;
     sys.write(Path::new(UNIT), UNIT_TEXT.as_bytes(), 0o644, Owner::Root)?;
+    sys.write(Path::new(HELPER_UNIT), HELPER_UNIT_TEXT.as_bytes(), 0o644, Owner::Root)?;
     for dir in [STATE, REC] {
         if !sys.exists(Path::new(dir)) {
             sys.mkdir(Path::new(dir), 0o750, Owner::Service)?;
@@ -71,7 +74,8 @@ pub fn install(sys: &mut dyn System, exe: &[u8]) -> Result<Outcome> {
     }
     let credential = sys.read(Path::new(CREDENTIAL)).map(|c| String::from_utf8_lossy(&c).trim().to_string());
     sys.run(&["systemctl", "daemon-reload"])?;
-    sys.run(&["systemctl", "enable", "vinyl-bridge.service"])?;
+    sys.run(&["systemctl", "enable", "vinyl-bridge-helper.service", "vinyl-bridge.service"])?;
+    sys.run(&["systemctl", "restart", "vinyl-bridge-helper.service"])?;
     sys.run(&["systemctl", "restart", "vinyl-bridge.service"])?;
     let cfg: crate::config::Config = sys.read(Path::new(CONFIG)).and_then(|t| toml::from_str(&String::from_utf8_lossy(&t)).ok()).unwrap_or_default();
     let port = cfg.http_bind.rsplit_once(':').map(|(_, p)| p).filter(|p| *p != "80").map(|p| format!(":{p}")).unwrap_or_default();
@@ -85,6 +89,15 @@ fn root_dir(sys: &mut dyn System, dir: &str, mode: u32, owner: Owner) -> Result<
     sys.set_owner(Path::new(dir), mode, owner)
 }
 
+pub fn service_ids() -> Result<(u32, u32)> {
+    let name = std::ffi::CString::new(SERVICE_USER)?;
+    let pw = unsafe { libc::getpwnam(name.as_ptr()) };
+    if pw.is_null() {
+        bail!("user {SERVICE_USER} not found");
+    }
+    Ok(unsafe { ((*pw).pw_uid, (*pw).pw_gid) })
+}
+
 pub struct HostSystem;
 
 impl HostSystem {
@@ -92,12 +105,7 @@ impl HostSystem {
         if owner == Owner::Root {
             return Ok((0, 0));
         }
-        let name = std::ffi::CString::new(SERVICE_USER)?;
-        let pw = unsafe { libc::getpwnam(name.as_ptr()) };
-        if pw.is_null() {
-            bail!("user {SERVICE_USER} not found");
-        }
-        let (uid, gid) = unsafe { ((*pw).pw_uid, (*pw).pw_gid) };
+        let (uid, gid) = service_ids()?;
         Ok(if owner == Owner::Service { (uid, gid) } else { (0, gid) })
     }
 }
@@ -241,7 +249,12 @@ mod tests {
         assert!(unit.contains("\nUser=vinyl-bridge\n") && unit.contains("\nStateDirectory=vinyl-bridge\n"));
         assert!(unit.contains(&format!("\nExecStart={BIN} --config {CONFIG}\n")));
         assert!(!unit.contains("User=root") && !unit.contains("ReadWritePaths"));
-        for (path, mode, owner) in [(BIN, 0o755, Owner::Root), (ETC, 0o755, Owner::Root), (CONFIG, 0o644, Owner::Root), (TLS, 0o750, Owner::RootServiceGroup), (CERT, 0o644, Owner::Root), (KEY, 0o640, Owner::RootServiceGroup), (UNIT, 0o644, Owner::Root), (STATE, 0o750, Owner::Service), (REC, 0o750, Owner::Service), (CREDENTIAL, 0o600, Owner::Service)] {
+        let helper = String::from_utf8(sys.entry(HELPER_UNIT).data.clone().unwrap()).unwrap();
+        assert!(helper.contains(&format!("\nExecStart={BIN} helper\n")) && helper.contains("\nRuntimeDirectory=vinyl-bridge-helper\n"));
+        assert!(helper.contains("\nRuntimeDirectoryMode=0755\n") && !helper.contains("User="));
+        assert!(sys.commands.contains(&"systemctl enable vinyl-bridge-helper.service vinyl-bridge.service".to_string()));
+        assert!(sys.commands.contains(&"systemctl restart vinyl-bridge-helper.service".to_string()));
+        for (path, mode, owner) in [(BIN, 0o755, Owner::Root), (ETC, 0o755, Owner::Root), (CONFIG, 0o644, Owner::Root), (TLS, 0o750, Owner::RootServiceGroup), (CERT, 0o644, Owner::Root), (KEY, 0o640, Owner::RootServiceGroup), (UNIT, 0o644, Owner::Root), (HELPER_UNIT, 0o644, Owner::Root), (STATE, 0o750, Owner::Service), (REC, 0o750, Owner::Service), (CREDENTIAL, 0o600, Owner::Service)] {
             let e = sys.entry(path);
             assert_eq!((e.mode, e.owner), (mode, owner), "{path}");
         }
@@ -252,7 +265,7 @@ mod tests {
         let mut sys = FakeSystem::default();
         install(&mut sys, b"exe").unwrap();
         for (path, e) in &sys.files {
-            let privileged = [BIN, ETC, UNIT].iter().any(|p| Path::new(p).starts_with(path) || path.starts_with(p));
+            let privileged = [BIN, ETC, UNIT, HELPER_UNIT].iter().any(|p| Path::new(p).starts_with(path) || path.starts_with(p));
             if privileged {
                 assert_ne!(e.owner, Owner::Service, "{}", path.display());
                 assert_eq!(e.mode & 0o022, 0, "{}", path.display());
