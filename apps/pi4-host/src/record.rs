@@ -614,7 +614,7 @@ fn pcm_wire_to_wav(pcm: &[u8], bits: u16) -> Vec<u8> {
     out
 }
 
-fn block_dbfs_wire(buf: &[u8], bits: u16) -> f64 {
+pub(crate) fn block_dbfs_wire(buf: &[u8], bits: u16) -> f64 {
     let bps = wire_bytes_per_sample(bits);
     if bps == 0 || buf.len() < bps {
         return -120.0;

@@ -13,6 +13,8 @@ mod chromecast;
 mod collection;
 mod config;
 mod control;
+#[cfg(test)]
+mod fixtures;
 mod mdns_svc;
 mod music_id;
 mod record;
