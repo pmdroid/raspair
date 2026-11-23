@@ -33,6 +33,8 @@ jobs:
       - uses: jdx/mise-action@b44d12e7d0d8ee7461bb893e1b1993500433185b
         with:
           version: 2026.9.11
+      - name: Release workflow triggers cover every release build input
+        run: python3 -I apps/pi4-host/scripts/check-release-paths.py
       - name: Test Rust packages
         run: cargo test --locked --workspace --all-targets
       - name: Test ALSA capture
