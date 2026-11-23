@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+set -euo pipefail
+BIN="${1:?usage: offline-smoke.sh BINARY ROOTFS}"
+ROOTFS="$(cd "${2:?usage: offline-smoke.sh BINARY ROOTFS}" && pwd)"
+QEMU="${QEMU_USER:-$(command -v qemu-aarch64 || command -v qemu-aarch64-static)}"
+PORT="${HTTP_PORT:-18080}"
+
+if [[ "${RASPAIR_SMOKE_NETNS:-}" != 1 ]]; then
+  install -D -m 0755 "$BIN" "$ROOTFS/usr/local/bin/vinyl-bridge-pi"
+  RASPAIR_SMOKE_NETNS=1 QEMU_USER="$QEMU" exec unshare -rn "$0" "$ROOTFS/usr/local/bin/vinyl-bridge-pi" "$ROOTFS"
+fi
+
+ip link set lo up
+[[ "$(ip -o link show | grep -cv ' lo:')" == 0 ]] || { echo "error: namespace has non-loopback links" >&2; exit 1; }
+work="$(mktemp -d)"
+mkdir -p "$work/rec"
+printf 'device_name = "Offline smoke"\nhttp_bind = "127.0.0.1:%s"\nrecord_dir = "%s/rec"\n' "$PORT" "$work" >"$work/config.toml"
+printf '{"music_id_enabled": true, "acoustid_api_key": "offline-smoke"}\n' >"$work/settings.json"
+env -i PATH=/nonexistent HOME="$work" "$QEMU" -L "$ROOTFS" "$BIN" --config "$work/config.toml" --log warn \
+  >"$work/daemon.log" 2>&1 &
+pid=$!
+trap 'kill "$pid" 2>/dev/null || true; rm -rf "$work"' EXIT
+
+base="http://127.0.0.1:$PORT"
+fail() { echo "FAIL: $*" >&2; tail -50 "$work/daemon.log" >&2; exit 1; }
+for _ in $(seq 1 240); do
+  curl -fsS -o /dev/null "$base/api/status" 2>/dev/null && break
+  kill -0 "$pid" 2>/dev/null || fail "daemon exited"
+  sleep 0.5
+done
+check() {
+  local path="$1" type="$2" got
+  got="$(curl -fsS -o "$work/body" -w '%{content_type}' "$base$path")" || fail "GET $path"
+  [[ "$got" == "$type"* ]] || fail "GET $path content-type $got, expected $type"
+  echo "ok: GET $path ($got)"
+}
+
+check / text/html
+grep -q 'id="root"' "$work/body" || fail "/ is not the React index"
+mapfile -t assets < <(grep -o '\./assets/[^"]*\.\(js\|css\)' "$work/body" | sort -u)
+[[ ${#assets[@]} -ge 2 ]] || fail "index references ${#assets[@]} assets"
+fonts=()
+for a in "${assets[@]}"; do
+  case "$a" in
+    *.js) check "/${a#./}" text/javascript ;;
+    *.css)
+      check "/${a#./}" text/css
+      mapfile -t -O "${#fonts[@]}" fonts < <(grep -o '[^("]*\.woff2' "$work/body" | sort -u) ;;
+  esac
+done
+[[ ${#fonts[@]} -ge 1 ]] || fail "stylesheet references no woff2 fonts"
+for f in "${fonts[@]}"; do
+  case "$f" in /*) check "$f" font/woff2 ;; *) check "/assets/${f#./}" font/woff2 ;; esac
+done
+check /licenses text/plain
+check /ui text/html
+check /api/status application/json
+
+curl -fsS -X POST -H 'content-type: application/json' -d '{}' "$base/api/record/start" >/dev/null || fail "record start"
+sleep 2
+curl -fsS -X POST "$base/api/record/stop" >/dev/null || fail "record stop"
+name="$(curl -fsS "$base/api/record/files" | grep -o '"name":"[^"]*\.wav"' | head -1 | cut -d'"' -f4)"
+[[ -n "$name" && -s "$work/rec/$name" ]] || fail "no WAV recording"
+echo "ok: recorded $name ($(stat -c %s "$work/rec/$name") bytes)"
+curl -fsS -X POST -H 'content-type: application/json' -d "{\"file\":\"$name\"}" "$base/api/record/identify" >"$work/id.json" \
+  || fail "identify"
+grep -q '"status":"untagged"' "$work/id.json" && grep -q 'fpcalc unavailable' "$work/id.json" \
+  || fail "identify without helpers: $(cat "$work/id.json")"
+echo "ok: identification without fpcalc -> untagged"
+echo "PASS: offline smoke ($(cat "$ROOTFS/etc/debian_version"), $("$QEMU" --version | head -1))"
