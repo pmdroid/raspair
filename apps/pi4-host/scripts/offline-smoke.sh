@@ -28,11 +28,22 @@ for _ in $(seq 1 240); do
   kill -0 "$pid" 2>/dev/null || fail "daemon exited"
   sleep 0.5
 done
+# req METHOD PATH [JSON]: body in $work/body; on curl error or non-2xx, fail with the
+# request, status and response body (a bare `curl -f` hid which request returned 500).
+req() {
+  local method="$1" path="$2" data="${3-}" code
+  local args=(-sS -X "$method" -o "$work/body" -w '%{http_code} %{content_type}')
+  [[ -n "$data" ]] && args+=(-H 'content-type: application/json' -d "$data")
+  code="$(curl "${args[@]}" "$base$path")" || fail "$method $path: curl error"
+  resp_type="${code#* }"
+  code="${code%% *}"
+  [[ "$code" == 2?? ]] || fail "$method $path -> HTTP $code: $(head -c 2000 "$work/body")"
+}
 check() {
-  local path="$1" type="$2" got
-  got="$(curl -fsS -o "$work/body" -w '%{content_type}' "$base$path")" || fail "GET $path"
-  [[ "$got" == "$type"* ]] || fail "GET $path content-type $got, expected $type"
-  echo "ok: GET $path ($got)"
+  local path="$1" type="$2"
+  req GET "$path"
+  [[ "$resp_type" == "$type"* ]] || fail "GET $path content-type $resp_type, expected $type"
+  echo "ok: GET $path ($resp_type)"
 }
 
 check / text/html
@@ -56,14 +67,17 @@ check /licenses text/plain
 check /ui text/html
 check /api/status application/json
 
-curl -fsS -X POST -H 'content-type: application/json' -d '{}' "$base/api/record/start" >/dev/null || fail "record start"
+req POST /api/record/start '{}'
 sleep 2
-curl -fsS -X POST "$base/api/record/stop" >/dev/null || fail "record stop"
-name="$(curl -fsS "$base/api/record/files" | grep -o '"name":"[^"]*\.wav"' | head -1 | cut -d'"' -f4)"
-[[ -n "$name" && -s "$work/rec/$name" ]] || fail "no WAV recording"
+req POST /api/record/stop
+# Stop spawns identification, which writes the WAV's sidecar (<stem>.json.tmp, then rename)
+# while the listing below runs. PAS-2348: that race returned HTTP 500 from the listing.
+for _ in $(seq 1 20); do req GET /api/record/files; done
+name="$(grep -o '"name":"[^"]*\.wav"' "$work/body" | head -1 | cut -d'"' -f4)"
+[[ -n "$name" && -s "$work/rec/$name" ]] || fail "no WAV recording in $(cat "$work/body")"
 echo "ok: recorded $name ($(stat -c %s "$work/rec/$name") bytes)"
-curl -fsS -X POST -H 'content-type: application/json' -d "{\"file\":\"$name\"}" "$base/api/record/identify" >"$work/id.json" \
-  || fail "identify"
+req POST /api/record/identify "{\"file\":\"$name\"}"
+cp "$work/body" "$work/id.json"
 grep -q '"status":"untagged"' "$work/id.json" && grep -q 'fpcalc unavailable' "$work/id.json" \
   || fail "identify without helpers: $(cat "$work/id.json")"
 echo "ok: identification without fpcalc -> untagged"
