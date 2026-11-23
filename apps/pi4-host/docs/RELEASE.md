@@ -104,9 +104,12 @@ are not covered here.
 ## Release workflow
 
 `.github/workflows/release.yml` runs on `v*` tags, on demand, and on pushes
-and pull requests that change `Cargo.lock`, the Pi host manifest or build
-script, `apps/pi4-host/scripts/` or `apps/web/bun.lock`, so it repeats when
-the FLAC, fingerprint and MP3 work adds codec dependencies. On an arm64
+and pull requests that change any input of the release build: the workspace
+and Pi host manifests, `Cargo.lock`, `mise.toml`, `apps/pi4-host/src`,
+`static`, `deploy/systemd` (units embedded by `install`), `config.example.toml`,
+`build.rs`, `scripts/`, `apps/web/` and `crates/airplay-core`. CI runs
+`scripts/check-release-paths.py`, which fails when a path streamed into the
+builder by `build-release.sh` is missing from either filter. On an arm64
 runner it:
 
 1. extracts the root partition of the image above with
@@ -119,5 +122,8 @@ runner it:
 4. runs `scripts/offline-smoke.sh BINARY ROOTFS`, the qemu-user smoke above:
    loopback-only network namespace, `PATH=/nonexistent`, React index, its
    JS, CSS and fonts, `/licenses`, `/ui`, `/api/status`, a WAV recording and
-   identification ending `untagged` because `fpcalc` is absent;
+   identification ending `untagged` because `fpcalc` is absent. Every API
+   request reports its method, path, status and response body on failure,
+   and the recording listing is requested repeatedly while identification
+   writes its sidecar (the PAS-2348 regression);
 5. uploads `dist/` as the `vinyl-bridge-pi` artifact.

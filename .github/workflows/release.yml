@@ -5,20 +5,42 @@ on:
     branches: [main]
     tags: ["v*"]
     paths:
+      # Everything that is compiled or embedded into vinyl-bridge-pi, or used to build and
+      # check it. Keep in sync with the source slice in apps/pi4-host/scripts/build-release.sh.
       - .github/workflows/release.yml
+      - Cargo.toml
       - Cargo.lock
+      - mise.toml
       - apps/pi4-host/Cargo.toml
       - apps/pi4-host/build.rs
+      - apps/pi4-host/LICENSES.dev.txt
+      - apps/pi4-host/config.example.toml
+      - apps/pi4-host/src/**
+      - apps/pi4-host/static/**
+      - apps/pi4-host/deploy/systemd/**
       - apps/pi4-host/scripts/**
-      - apps/web/bun.lock
+      - apps/web/**
+      - crates/airplay-core/**
+      - apps/airplay-rs/cli/Cargo.toml
   pull_request:
     paths:
+      # Everything that is compiled or embedded into vinyl-bridge-pi, or used to build and
+      # check it. Keep in sync with the source slice in apps/pi4-host/scripts/build-release.sh.
       - .github/workflows/release.yml
+      - Cargo.toml
       - Cargo.lock
+      - mise.toml
       - apps/pi4-host/Cargo.toml
       - apps/pi4-host/build.rs
+      - apps/pi4-host/LICENSES.dev.txt
+      - apps/pi4-host/config.example.toml
+      - apps/pi4-host/src/**
+      - apps/pi4-host/static/**
+      - apps/pi4-host/deploy/systemd/**
       - apps/pi4-host/scripts/**
-      - apps/web/bun.lock
+      - apps/web/**
+      - crates/airplay-core/**
+      - apps/airplay-rs/cli/Cargo.toml
   workflow_dispatch:
 
 permissions:
