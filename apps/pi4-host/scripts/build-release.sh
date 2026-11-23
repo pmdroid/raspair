@@ -56,6 +56,7 @@ elif [[ "$MODE" == docker ]]; then
   tar -C "$WORKSPACE" -cf - \
       Cargo.toml Cargo.lock apps/pi4-host/Cargo.toml apps/pi4-host/build.rs apps/pi4-host/LICENSES.dev.txt \
       apps/pi4-host/src apps/pi4-host/static "apps/pi4-host/$NOTICES" apps/web/dist \
+      apps/pi4-host/deploy/systemd apps/pi4-host/config.example.toml \
       crates/airplay-core apps/airplay-rs/cli \
   | docker run --rm -i --platform linux/arm64 \
       -v "$VOLUMES-cargo-registry:/usr/local/cargo/registry" \

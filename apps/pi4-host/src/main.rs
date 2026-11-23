@@ -15,6 +15,7 @@ mod config;
 mod control;
 #[cfg(test)]
 mod fixtures;
+mod install;
 mod mdns_svc;
 mod music_id;
 mod record;
@@ -64,6 +65,8 @@ struct Cli {
 enum Command {
     #[command(about = "Print the license notices embedded in this executable")]
     Licenses,
+    #[command(about = "Install or repair the vinyl-bridge service (run with sudo)")]
+    Install,
 }
 
 #[tokio::main]
@@ -71,6 +74,16 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     if let Some(Command::Licenses) = cli.command {
         let _ = std::io::Write::write_all(&mut std::io::stdout(), webapi::LICENSES.as_bytes());
+        return Ok(());
+    }
+    if let Some(Command::Install) = cli.command {
+        anyhow::ensure!(unsafe { libc::geteuid() } == 0, "install must run as root: sudo vinyl-bridge-pi install");
+        let exe = std::fs::read(std::env::current_exe()?).context("read running executable")?;
+        let out = install::install(&mut install::HostSystem, &exe)?;
+        println!("vinyl-bridge installed. Setup: {}", out.url);
+        if let Some(credential) = out.credential {
+            println!("One-time setup credential: {credential}");
+        }
         return Ok(());
     }
     tracing_subscriber::fmt()

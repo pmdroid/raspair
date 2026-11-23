@@ -1,29 +1,31 @@
-# LEGACY for Raspberry Pi OS / systemd hosts only.
+# Raspberry Pi OS / systemd hosts. Written by `sudo vinyl-bridge-pi install`.
 # Buildroot appliance uses busybox /etc/init.d/S99vinyl-bridge instead.
 [Unit]
 Description=Vinyl Audio Bridge (Pi host)
-Documentation=https://github.com/pmdroid/vinyl-repo
+Documentation=https://github.com/pmdroid/raspair
 After=network-online.target sound.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-User=root
-Group=root
+User=vinyl-bridge
+Group=vinyl-bridge
+SupplementaryGroups=audio
 ExecStart=/usr/local/bin/vinyl-bridge-pi --config /etc/vinyl-bridge/config.toml
 Restart=on-failure
 RestartSec=2
 Environment=RUST_LOG=info
+StateDirectory=vinyl-bridge
+StateDirectoryMode=0750
 # Real-time-ish audio: allow higher priority without full RT privileges.
 LimitRTPRIO=20
 LimitMEMLOCK=infinity
 # Capture + HTTP
 AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_SYS_NICE
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_SYS_NICE CAP_SYS_RESOURCE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_SYS_NICE
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/lib/vinyl-bridge /etc/vinyl-bridge /tmp
 PrivateTmp=true
 
 [Install]

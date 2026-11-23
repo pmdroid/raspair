@@ -28,6 +28,7 @@ Standalone **Rust** host that mirrors the ESP32-P4 / C5 firmware control surface
 | Pi binary (Docker) | `scripts/build-release.sh` |
 | **Legacy** Pi OS inject | `deploy/image/*` (**deprecated**) |
 | QEMU smoke | `scripts/qemu-smoke.sh` |
+| Pi OS service install/repair | `sudo vinyl-bridge-pi install` |
 | SSH install (running Linux) | `scripts/install-on-running-pi.sh` |
 
 ## Features (Cargo)
