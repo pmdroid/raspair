@@ -15,6 +15,7 @@ mod config;
 mod control;
 #[cfg(test)]
 mod fixtures;
+mod helper;
 mod install;
 mod mdns_svc;
 mod music_id;
@@ -67,6 +68,8 @@ enum Command {
     Licenses,
     #[command(about = "Install or repair the vinyl-bridge service (run with sudo)")]
     Install,
+    #[command(about = "Run the restricted root system helper (started by systemd)")]
+    Helper,
 }
 
 #[tokio::main]
@@ -89,6 +92,10 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_new(&cli.log).unwrap_or_else(|_| EnvFilter::new("info")))
         .init();
+    if let Some(Command::Helper) = cli.command {
+        anyhow::ensure!(unsafe { libc::geteuid() } == 0, "helper must run as root");
+        return helper::run().await;
+    }
 
     let config_path = cli.config.or_else(|| {
         let p = PathBuf::from("/etc/vinyl-bridge/config.toml");
