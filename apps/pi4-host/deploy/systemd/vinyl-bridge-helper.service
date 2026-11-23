@@ -1,0 +1,21 @@
+# Restricted root helper for vinyl-bridge. Written by `sudo vinyl-bridge-pi install`.
+# Accepts only fixed requests from the vinyl-bridge account on its Unix socket.
+[Unit]
+Description=Vinyl Audio Bridge system helper
+Documentation=https://github.com/pmdroid/raspair
+Before=vinyl-bridge.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/vinyl-bridge-pi helper
+Restart=on-failure
+RestartSec=2
+Environment=RUST_LOG=info
+RuntimeDirectory=vinyl-bridge-helper
+RuntimeDirectoryMode=0755
+UMask=0117
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

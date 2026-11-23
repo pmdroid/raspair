@@ -3,8 +3,8 @@
 [Unit]
 Description=Vinyl Audio Bridge (Pi host)
 Documentation=https://github.com/pmdroid/raspair
-After=network-online.target sound.target
-Wants=network-online.target
+After=network-online.target sound.target vinyl-bridge-helper.service
+Wants=network-online.target vinyl-bridge-helper.service
 
 [Service]
 Type=simple
