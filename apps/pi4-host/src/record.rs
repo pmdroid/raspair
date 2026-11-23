@@ -462,34 +462,7 @@ impl Recorder {
     }
 
     pub fn list_files(&self) -> Result<Vec<RecordFile>> {
-        if !self.dir.exists() {
-            return Ok(Vec::new());
-        }
-        let mut out = Vec::new();
-        for ent in fs::read_dir(&self.dir)? {
-            let ent = ent?;
-            let meta = ent.metadata()?;
-            if !meta.is_file() {
-                continue;
-            }
-            let name = ent.file_name().to_string_lossy().into_owned();
-            if !name.to_ascii_lowercase().ends_with(".wav") {
-                continue;
-            }
-            let mtime = meta
-                .modified()
-                .ok()
-                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-            out.push(RecordFile {
-                name,
-                size: meta.len(),
-                mtime,
-            });
-        }
-        out.sort_by(|a, b| b.mtime.cmp(&a.mtime));
-        Ok(out)
+        list_wavs(&self.dir, |ent| ent.metadata())
     }
 
     pub fn resolve_download(&self, name: &str) -> Result<PathBuf> {
@@ -512,6 +485,53 @@ impl Recorder {
     pub fn record_dir(&self) -> &Path {
         &self.dir
     }
+}
+
+/// List the `.wav` recordings in `dir`, newest first.
+///
+/// The directory is shared with writers that create and rename files while a
+/// listing runs: sidecars are saved as `<stem>.json.tmp` and renamed, and
+/// auto-split deletes short tracks. Entries are filtered by name before they
+/// are stat-ed, and a recording that disappears between `readdir` and `stat`
+/// is skipped instead of failing the whole listing (which surfaced as
+/// HTTP 500 from `GET /api/record/files` right after `POST /api/record/stop`).
+/// `stat` is injectable so the race can be tested deterministically.
+fn list_wavs(
+    dir: &Path,
+    stat: impl Fn(&fs::DirEntry) -> std::io::Result<fs::Metadata>,
+) -> Result<Vec<RecordFile>> {
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::new();
+    for ent in fs::read_dir(dir)? {
+        let ent = ent?;
+        let name = ent.file_name().to_string_lossy().into_owned();
+        if !name.to_ascii_lowercase().ends_with(".wav") {
+            continue;
+        }
+        let meta = match stat(&ent) {
+            Ok(m) => m,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e).with_context(|| format!("stat {}", ent.path().display())),
+        };
+        if !meta.is_file() {
+            continue;
+        }
+        let mtime = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        out.push(RecordFile {
+            name,
+            size: meta.len(),
+            mtime,
+        });
+    }
+    out.sort_by(|a, b| b.mtime.cmp(&a.mtime));
+    Ok(out)
 }
 
 struct FinalizedTrack {
@@ -734,4 +754,56 @@ fn write_wav_header(
     file.write_all(b"data")?;
     file.write_all(&data_bytes.to_le_bytes())?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Error, ErrorKind};
+
+    fn scratch() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("pas2348-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    // PAS-2348: the post-merge offline smoke got HTTP 500 from GET /api/record/files
+    // because identification (spawned by POST /api/record/stop) renamed
+    // `<stem>.json.tmp` between readdir and stat. Simulate both vanishing kinds.
+    #[test]
+    fn listing_survives_files_vanishing_between_readdir_and_stat() {
+        let dir = scratch();
+        fs::write(dir.join("rec-1.wav"), vec![0u8; 44]).unwrap();
+        fs::write(dir.join("rec-1.json.tmp"), b"{}").unwrap();
+        fs::write(dir.join("rec-2-t01.wav"), b"short").unwrap();
+        let stat_calls = std::cell::RefCell::new(Vec::new());
+        let files = list_wavs(&dir, |ent| {
+            let name = ent.file_name().to_string_lossy().into_owned();
+            stat_calls.borrow_mut().push(name.clone());
+            match name.as_str() {
+                "rec-1.json.tmp" | "rec-2-t01.wav" => Err(Error::from(ErrorKind::NotFound)),
+                _ => ent.metadata(),
+            }
+        })
+        .expect("a vanished entry must not fail the listing");
+        let names: Vec<_> = files.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, ["rec-1.wav"]);
+        assert_eq!(files[0].size, 44);
+        assert!(!stat_calls.borrow().iter().any(|n| n.ends_with(".tmp")), "non-WAV entries are not stat-ed");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn listing_still_reports_other_stat_errors() {
+        let dir = scratch();
+        fs::write(dir.join("rec-1.wav"), b"x").unwrap();
+        let err = list_wavs(&dir, |_| Err(Error::from(ErrorKind::PermissionDenied))).unwrap_err();
+        assert!(err.to_string().contains("rec-1.wav"), "{err}");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn listing_a_missing_directory_is_empty() {
+        assert!(list_wavs(&std::env::temp_dir().join("pas2348-missing"), |e| e.metadata()).unwrap().is_empty());
+    }
 }
