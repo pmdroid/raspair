@@ -1,0 +1,7 @@
+vinyl-bridge-pi development build
+
+vinyl-bridge-pi is licensed under the MIT license.
+
+This build was not produced by scripts/build-release.sh, so it does not
+carry the generated third-party license notices. Release builds embed the
+full notices for every linked Rust crate and bundled web asset.

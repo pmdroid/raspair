@@ -55,11 +55,24 @@ struct Cli {
     /// Log filter (RUST_LOG style).
     #[arg(long, default_value = "info", env = "RUST_LOG")]
     log: String,
+
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Debug, clap::Subcommand)]
+enum Command {
+    #[command(about = "Print the license notices embedded in this executable")]
+    Licenses,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    if let Some(Command::Licenses) = cli.command {
+        print!("{}", webapi::LICENSES);
+        return Ok(());
+    }
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_new(&cli.log).unwrap_or_else(|_| EnvFilter::new("info")))
         .init();

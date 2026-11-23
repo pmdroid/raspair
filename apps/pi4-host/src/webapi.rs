@@ -41,7 +41,7 @@ pub struct AppState {
 pub fn router(state: AppState) -> Router {
     Router::new()
         // Management UI (embedded)
-        .route("/", get(ui_get))
+        .route("/", get(root_get))
         .route("/ui", get(ui_get))
         .route("/ui/", get(ui_get))
         // Live capture stream (ESP capture_tap / Chromecast PCM URL parity)
@@ -72,6 +72,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/record/identify", post(record_identify_post))
         .route("/api/record/tag", post(record_tag_post))
         .route("/api", get(api_root_get))
+        .route("/licenses", get(licenses_get))
+        .fallback(get(asset_get))
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
         .with_state(state)
@@ -79,8 +81,51 @@ pub fn router(state: AppState) -> Router {
 
 const UI_HTML: &str = include_str!("../static/index.html");
 
+mod embedded {
+    include!(concat!(env!("OUT_DIR"), "/embedded.rs"));
+}
+
+pub use embedded::LICENSES;
+
 async fn ui_get() -> Html<&'static str> {
     Html(UI_HTML)
+}
+
+async fn root_get() -> Response {
+    embedded_response(embedded::WEB_ASSETS, "/").unwrap_or_else(|| Html(UI_HTML).into_response())
+}
+
+async fn asset_get(uri: axum::http::Uri) -> Response {
+    embedded_response(embedded::WEB_ASSETS, uri.path()).unwrap_or_else(|| StatusCode::NOT_FOUND.into_response())
+}
+
+async fn licenses_get() -> Response {
+    ([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], LICENSES).into_response()
+}
+
+fn content_type(path: &str) -> &'static str {
+    match path.rsplit_once('.').map(|(_, ext)| ext) {
+        Some("html") => "text/html; charset=utf-8",
+        Some("js") => "text/javascript; charset=utf-8",
+        Some("css") => "text/css; charset=utf-8",
+        Some("json") => "application/json",
+        Some("svg") => "image/svg+xml",
+        Some("png") => "image/png",
+        Some("ico") => "image/x-icon",
+        Some("woff2") => "font/woff2",
+        Some("woff") => "font/woff",
+        Some("flac") => "audio/flac",
+        Some("vtt") => "text/vtt; charset=utf-8",
+        Some("txt") => "text/plain; charset=utf-8",
+        _ => "application/octet-stream",
+    }
+}
+
+fn embedded_response(assets: &[(&str, &'static [u8])], path: &str) -> Option<Response> {
+    let path = if path == "/" { "/index.html" } else { path };
+    let (_, body) = assets.iter().find(|(p, _)| *p == path)?;
+    let cache = if path.starts_with("/assets/") { "public, max-age=31536000, immutable" } else { "no-cache" };
+    Some(([(header::CONTENT_TYPE, content_type(path)), (header::CACHE_CONTROL, cache)], *body).into_response())
 }
 
 async fn api_root_get(State(st): State<AppState>) -> Json<Value> {
@@ -540,4 +585,70 @@ async fn volume_post(State(st): State<AppState>, Json(body): Json<VolumeBody>) -
         ..Default::default()
     });
     Json(status_json(&st))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn references(assets: &[(&str, &[u8])]) -> Vec<String> {
+        let mut out = Vec::new();
+        for (path, body) in assets.iter().filter(|(p, _)| p.ends_with(".html") || p.ends_with(".css")) {
+            let text = String::from_utf8_lossy(body);
+            let dir = &path[..path.rfind('/').unwrap() + 1];
+            for marker in ["src=\"", "href=\"", "url("] {
+                for chunk in text.split(marker).skip(1) {
+                    let target = chunk.trim_start_matches(['"', '\'']).split(['"', '\'', ')', '?', '#']).next().unwrap_or("");
+                    if let Some(rel) = target.strip_prefix("./") {
+                        out.push(format!("{dir}{rel}"));
+                    } else if !target.is_empty() && !target.contains(':') && !target.starts_with('/') && !target.starts_with("data") {
+                        out.push(format!("{dir}{target}"));
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    fn missing(assets: &[(&str, &[u8])]) -> Vec<String> {
+        references(assets).into_iter().filter(|r| !assets.iter().any(|(p, _)| p == r)).collect()
+    }
+
+    const FAKE: &[(&str, &[u8])] = &[
+        ("/index.html", b"<script src=\"./assets/app.js\"></script><link href=\"./assets/app.css\">"),
+        ("/assets/app.js", b"console.log(1)"),
+        ("/assets/app.css", b"@font-face{src:url(./font.woff2) format(\"woff2\")}"),
+        ("/assets/font.woff2", b"wOF2"),
+    ];
+
+    #[test]
+    fn serves_nested_assets_with_types() {
+        let root = embedded_response(FAKE, "/").unwrap();
+        assert_eq!(root.headers()[header::CONTENT_TYPE], "text/html; charset=utf-8");
+        assert_eq!(root.headers()[header::CACHE_CONTROL], "no-cache");
+        let font = embedded_response(FAKE, "/assets/font.woff2").unwrap();
+        assert_eq!(font.headers()[header::CONTENT_TYPE], "font/woff2");
+        assert!(font.headers()[header::CACHE_CONTROL].to_str().unwrap().contains("immutable"));
+        assert!(embedded_response(FAKE, "/assets/missing.js").is_none());
+        assert!(embedded_response(&[], "/").is_none());
+    }
+
+    #[test]
+    fn detects_missing_relative_references() {
+        assert_eq!(references(FAKE).len(), 3);
+        assert!(missing(FAKE).is_empty());
+        assert_eq!(missing(&FAKE[..2]), vec!["/assets/app.css".to_string()]);
+    }
+
+    #[test]
+    fn embedded_web_assets_are_self_contained() {
+        assert!(missing(embedded::WEB_ASSETS).is_empty(), "{:?}", missing(embedded::WEB_ASSETS));
+        for (path, body) in embedded::WEB_ASSETS {
+            if path.ends_with(".html") || path.ends_with(".css") {
+                let text = String::from_utf8_lossy(body);
+                assert!(!text.contains("fonts.googleapis") && !text.contains("//cdn"), "{path} loads a network resource");
+            }
+        }
+        assert!(!LICENSES.is_empty());
+    }
 }
