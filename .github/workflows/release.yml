@@ -1,0 +1,91 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+    paths:
+      - .github/workflows/release.yml
+      - Cargo.lock
+      - apps/pi4-host/Cargo.toml
+      - apps/pi4-host/build.rs
+      - apps/pi4-host/scripts/**
+      - apps/web/bun.lock
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - Cargo.lock
+      - apps/pi4-host/Cargo.toml
+      - apps/pi4-host/build.rs
+      - apps/pi4-host/scripts/**
+      - apps/web/bun.lock
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  release:
+    name: Build, rebuild from source package and smoke test
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 120
+    env:
+      RASPAIR_BUILDER: docker
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@b44d12e7d0d8ee7461bb893e1b1993500433185b
+        with:
+          version: 2026.9.11
+      - name: Install qemu-user and allow user namespaces
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-user e2fsprogs
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: Extract the Raspberry Pi OS Lite (Trixie) rootfs
+        run: |
+          echo "PIOS_ROOTFS=$RUNNER_TEMP/pios-rootfs" >>"$GITHUB_ENV"
+          apps/pi4-host/scripts/pios-rootfs.sh "$RUNNER_TEMP/pios-rootfs" "$RUNNER_TEMP/pios-cache"
+      - name: Build release with the pinned Docker builder
+        env:
+          DOCKER_VOLUME_PREFIX: release
+        run: apps/pi4-host/scripts/build-release.sh
+      - name: Rebuild from the source package
+        env:
+          DOCKER_VOLUME_PREFIX: rebuild
+        run: |
+          archive="$(ls apps/pi4-host/dist/raspair-*-source.tar.gz)"
+          name="$(basename "$archive" -source.tar.gz)"
+          mkdir "$RUNNER_TEMP/source"
+          tar -xzf "$archive" -C "$RUNNER_TEMP/source"
+          cp "$archive" "$RUNNER_TEMP/"
+          cd "$RUNNER_TEMP/source/$name"
+          mise trust mise.toml
+          RASPAIR_SOURCE_ARCHIVE="$RUNNER_TEMP/$(basename "$archive")" apps/pi4-host/scripts/build-release.sh
+          echo "REBUILD_DIST=$PWD/apps/pi4-host/dist" >>"$GITHUB_ENV"
+      - name: Compare SHA256SUMS
+        run: diff -u apps/pi4-host/dist/SHA256SUMS "$REBUILD_DIST/SHA256SUMS"
+      - name: Check ELF dependencies against the rootfs
+        run: apps/pi4-host/scripts/check-elf.sh apps/pi4-host/dist/vinyl-bridge-pi "$PIOS_ROOTFS"
+      - name: Offline smoke under qemu-user
+        run: apps/pi4-host/scripts/offline-smoke.sh apps/pi4-host/dist/vinyl-bridge-pi "$PIOS_ROOTFS"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: vinyl-bridge-pi
+          path: |
+            apps/pi4-host/dist/vinyl-bridge-pi
+            apps/pi4-host/dist/vinyl-bridge-pi.*
+            apps/pi4-host/dist/THIRD-PARTY-NOTICES.txt
+            apps/pi4-host/dist/BUILDINFO
+            apps/pi4-host/dist/SHA256SUMS
+            apps/pi4-host/dist/raspair-*-source.tar.gz
+          if-no-files-found: error

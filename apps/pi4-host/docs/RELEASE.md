@@ -26,6 +26,17 @@ are set. It needs Bun 1.4.4 and Python 3 on the host. Inputs are locked by
 | `raspair-<version>-source.tar.gz` | `git archive` of the built commit |
 | `BUILDINFO`, `SHA256SUMS` | Commit, builder and build command; SHA-256 of every file above |
 
+`RASPAIR_BUILDER=docker|native|cross` forces a builder. The Docker builder
+streams the workspace slice, the web build and the notices into the
+container and writes its target to the `${DOCKER_VOLUME_PREFIX:-vinyl-pi}-target`
+volume.
+
+The source archive contains `SOURCE_COMMIT`. To rebuild from an extracted
+archive, run the same script inside it with `RASPAIR_SOURCE_ARCHIVE`
+pointing at the archive; the script checks the commit, copies that archive
+into `dist/` and records the same commit, so `SHA256SUMS` must match the
+original build byte for byte.
+
 `RASPAIR_RELEASE=1` makes a missing web build or notices file a build error.
 Other builds embed the web build if present and `LICENSES.dev.txt`.
 `notices.py` rejects packages without a license field or license file and
@@ -87,6 +98,26 @@ only loopback, with `PATH=/nonexistent` so no helper executable could run.
 - Recording start and stop wrote a WAV file. Identification of that file
   completed with status `untagged` and an `fpcalc unavailable` note.
 
-Booting the image on a Pi 4, React navigation in a browser on the device,
-and a release job that rebuilds from the source archive after FLAC,
-fingerprint and MP3 work lands are not covered here.
+Booting the image on a Pi 4 and React navigation in a browser on the device
+are not covered here.
+
+## Release workflow
+
+`.github/workflows/release.yml` runs on `v*` tags, on demand, and on pushes
+and pull requests that change `Cargo.lock`, the Pi host manifest or build
+script, `apps/pi4-host/scripts/` or `apps/web/bun.lock`, so it repeats when
+the FLAC, fingerprint and MP3 work adds codec dependencies. On an arm64
+runner it:
+
+1. extracts the root partition of the image above with
+   `scripts/pios-rootfs.sh DEST` (downloads, checks the pinned SHA-256,
+   `debugfs rdump`; no root needed);
+2. runs `build-release.sh` with `RASPAIR_BUILDER=docker` and
+   `PIOS_ROOTFS`, so `check-elf.sh` checks against the image;
+3. extracts `raspair-<version>-source.tar.gz`, rebuilds from it with a fresh
+   Docker target volume and fails unless both `SHA256SUMS` are identical;
+4. runs `scripts/offline-smoke.sh BINARY ROOTFS`, the qemu-user smoke above:
+   loopback-only network namespace, `PATH=/nonexistent`, React index, its
+   JS, CSS and fonts, `/licenses`, `/ui`, `/api/status`, a WAV recording and
+   identification ending `untagged` because `fpcalc` is absent;
+5. uploads `dist/` as the `vinyl-bridge-pi` artifact.
