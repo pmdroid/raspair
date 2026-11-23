@@ -344,7 +344,10 @@ impl Picker {
         let wrong_password = |e: &anyhow::Error| matches!(auth::pairing_error(e), Some(PairingError::WrongPassword));
         match outcome {
             Outcome::Devices(Ok(found)) => {
+                // A refresh is authoritative: receivers missing from it are no
+                // longer selectable (saved pairings stay in the store).
                 self.online = found.iter().map(key_of).collect();
+                self.devices.clear();
                 for d in found {
                     merge_device(&mut self.devices, d);
                 }
@@ -567,7 +570,61 @@ mod tests {
         let (target, _) = rig.picker.target().unwrap();
         assert_eq!((target.name.as_str(), target.ip().as_deref()), ("Den", Some("192.0.2.99")));
         assert_eq!(rig.picker.chosen_label().as_deref(), Some("Den (aa:02)"));
-        assert!(rig.screen().contains("unavailable needs pin"));
+        let screen = rig.screen();
+        assert!(!screen.contains("aa:01") && !screen.contains("unavailable"), "{screen}");
+    }
+
+    #[test]
+    fn refresh_through_the_shared_cache_drops_vanished_receivers_and_stereo_mates() {
+        use crate::auth::tests::{at, live};
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn CredentialStore> = Arc::new(MemoryStore::default());
+        store.save(&record("bb:01", AuthMethod::PairSetupPin, None)).unwrap();
+        let (mut backend, seen) = live(store.clone(), dir.path());
+        let mut picker = Picker::new(store.clone());
+        let mut refresh = |picker: &mut Picker| {
+            let job = picker.key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
+            assert!(matches!(job, Some(Job::Refresh)));
+            picker.apply(perform(&mut backend, job.unwrap()).unwrap());
+        };
+        let mate = |id: &str, ip: &str| {
+            let mut d = at(device(id, "Kitchen", "AudioAccessory5,1", 0), ip);
+            d.record.tight_sync_id = "grp".into();
+            d
+        };
+        let ids = |picker: &Picker| -> Vec<String> { picker.devices.iter().map(|d| d.record.device_id.clone()).collect() };
+
+        *seen.lock().unwrap() = vec![at(apple_tv("aa:01", "A"), "192.0.2.1"), at(apple_tv("bb:01", "B"), "192.0.2.2"), mate("cc:01", "192.0.2.3"), mate("cc:02", "192.0.2.4")];
+        refresh(&mut picker);
+        assert_eq!(picker.rows().len(), 3);
+        let stereo = picker.rows().into_iter().find(|r| r.members.len() == 2).unwrap();
+        picker.chosen = Some(stereo.key);
+
+        *seen.lock().unwrap() = vec![at(apple_tv("aa:01", "A"), "192.0.2.1"), mate("cc:01", "192.0.2.3")];
+        refresh(&mut picker);
+        assert_eq!(ids(&picker), ["aa:01", "cc:01"]);
+        assert!(picker.status.contains("2 receivers available"));
+        assert!(picker.target().is_none(), "the vanished stereo pair is no longer playable");
+        picker.chosen = Some("cc:01".into());
+        let (single, devices) = picker.target().unwrap();
+        assert!(StereoPair::resolve(&devices, &single).is_none(), "the old mate is not selected");
+        assert!(paired(&store, "bb:01"));
+
+        seen.lock().unwrap().clear();
+        refresh(&mut picker);
+        assert!(picker.rows().is_empty() && picker.status.contains("0 receivers available"));
+
+        *seen.lock().unwrap() = vec![at(apple_tv("bb:01", "B"), "192.0.2.50")];
+        refresh(&mut picker);
+        assert_eq!(ids(&picker), ["bb:01"]);
+        assert_eq!(picker.devices[0].ip().as_deref(), Some("192.0.2.50"));
+        assert!(screen_of(&picker).contains("paired (pair_setup_pin)"));
+    }
+
+    fn screen_of(picker: &Picker) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        terminal.draw(|f| picker.render(f, Palette::Plain)).unwrap();
+        terminal.backend().to_string()
     }
 
     #[test]
