@@ -9,13 +9,33 @@ mkdir -p dist
 
 log() { printf '==> %s\n' "$*"; }
 
-if [[ "$(uname -s)" == "Linux" && "$(uname -m)" == "aarch64" ]]; then
+TARGET=aarch64-unknown-linux-gnu
+BUILDER_IMAGE="${BUILDER_IMAGE:-rust:1.98.1-trixie@sha256:a8a5f0a1e5fe7dfe1d352591e4a1c7dd2c08fd70475cae872cf3458ba0df0546}"
+VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+NOTICES=dist/THIRD-PARTY-NOTICES.txt
+rm -f dist/vinyl-bridge-pi dist/vinyl-bridge-pi.* dist/SHA256SUMS dist/BUILDINFO dist/*-source.tar.gz
+
+log "locked web build (apps/web)"
+(cd "$WORKSPACE/apps/web" && bun install --frozen-lockfile && bun run build)
+
+log "license notices and dependency manifest"
+python3 -I scripts/notices.py "$WORKSPACE" "$WORKSPACE/apps/web" "$NOTICES" dist/vinyl-bridge-pi.manifest.json "$TARGET"
+export RASPAIR_RELEASE=1 RASPAIR_WEB_DIST="$WORKSPACE/apps/web/dist" RASPAIR_LICENSES="$ROOT/$NOTICES"
+
+if [[ "${CARGO_BUILD_TARGET:-}" == "$TARGET" ]]; then
+  log "cross build for $TARGET with host cargo (linker and sysroot from the environment)"
+  BUILDER="host cargo cross $(rustc --version)"
+  cargo build --locked -p vinyl-bridge-pi --release --no-default-features --features alsa
+  cp -f "${CARGO_TARGET_DIR:-$WORKSPACE/target}/$TARGET/release/vinyl-bridge-pi" dist/vinyl-bridge-pi
+elif [[ "$(uname -s)" == "Linux" && "$(uname -m)" == "aarch64" ]]; then
   log "native aarch64 Linux build (+alsa)"
+  BUILDER="native $(rustc --version)"
   cargo build --locked -p vinyl-bridge-pi --release --no-default-features --features alsa
   cp -f "${CARGO_TARGET_DIR:-$WORKSPACE/target}"/release/vinyl-bridge-pi dist/vinyl-bridge-pi
   strip dist/vinyl-bridge-pi || true
 elif command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
   log "Docker linux/arm64 native build (+alsa) with airplay-core path dep"
+  BUILDER="$BUILDER_IMAGE"
   # Stream monorepo slice via tar (avoids flaky bind mounts on external volumes).
   tar -C "$WORKSPACE" -cf - \
       Cargo.toml Cargo.lock apps/pi4-host/Cargo.toml apps/pi4-host/src apps/pi4-host/static \
@@ -30,7 +50,7 @@ elif command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
       rust:1-bookworm \
       bash -c 'set -euo pipefail
         apt-get update -qq
-        DEBIAN_FRONTEND=noninteractive apt-get install -y -qq libasound2-dev pkg-config >/dev/null
+        DEBIAN_FRONTEND=noninteractive apt-get install -y -qq libasound2-dev libssl-dev pkg-config >/dev/null
         mkdir -p /build
         tar -C /build -xf -
         cd /build
@@ -62,4 +82,22 @@ if ! file dist/vinyl-bridge-pi | grep -qiE 'ELF.*(aarch64|ARM aarch64|ARM64)'; t
   echo "warn: unexpected file(1) type — check manually" >&2
   file dist/vinyl-bridge-pi
 fi
+
+log "ELF dependencies against the stock Raspberry Pi OS allowlist"
+scripts/check-elf.sh dist/vinyl-bridge-pi ${PIOS_ROOTFS:+"$PIOS_ROOTFS"} | tee dist/vinyl-bridge-pi.elf.txt
+
+log "source package and build record"
+COMMIT="$(git -C "$WORKSPACE" rev-parse HEAD)"
+git -C "$WORKSPACE" diff --quiet HEAD || echo "warn: working tree differs from $COMMIT; source package is HEAD only" >&2
+git -C "$WORKSPACE" archive --format=tar.gz --prefix="raspair-$VERSION/" -o "$ROOT/dist/raspair-$VERSION-source.tar.gz" HEAD
+{
+  echo "version: $VERSION"
+  echo "commit: $COMMIT"
+  echo "target: $TARGET"
+  echo "builder: $BUILDER"
+  echo "bun: $(bun --version)"
+  echo "build: RASPAIR_RELEASE=1 cargo build --locked -p vinyl-bridge-pi --release --no-default-features --features alsa"
+} >dist/BUILDINFO
+(cd dist && sha256sum vinyl-bridge-pi vinyl-bridge-pi.manifest.json vinyl-bridge-pi.elf.txt THIRD-PARTY-NOTICES.txt BUILDINFO "raspair-$VERSION-source.tar.gz" >SHA256SUMS)
+cat dist/SHA256SUMS
 echo "OK: dist/vinyl-bridge-pi (Pi deploy artifact)"

@@ -70,7 +70,7 @@ enum Command {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     if let Some(Command::Licenses) = cli.command {
-        print!("{}", webapi::LICENSES);
+        let _ = std::io::Write::write_all(&mut std::io::stdout(), webapi::LICENSES.as_bytes());
         return Ok(());
     }
     tracing_subscriber::fmt()
