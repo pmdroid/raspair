@@ -1,5 +1,6 @@
 //! JSON device cache (compatible with the Go reference's `devices.json`) so
-//! repeated plays skip the multi-second mDNS scan.
+//! repeated plays skip the multi-second mDNS scan. The cache only ever holds
+//! the receivers seen by the latest scan; it is not a history of devices.
 
 use super::device::{merge_device, Device};
 use super::discover::{discover, find_device};
@@ -7,7 +8,7 @@ use crate::protocol::{FeatureFlags, TxtRecord};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::net::Ipv4Addr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[derive(Serialize, Deserialize)]
@@ -95,14 +96,13 @@ impl CachedDevice {
     }
 }
 
-fn read_cache() -> Result<Vec<Device>> {
-    let data = std::fs::read(config_path())?;
+fn read_cache(path: &Path) -> Result<Vec<Device>> {
+    let data = std::fs::read(path)?;
     let cached: Vec<CachedDevice> = serde_json::from_slice(&data)?;
     Ok(cached.iter().map(|c| c.to_device()).collect())
 }
 
-fn save_cache(devices: &[Device]) -> Result<()> {
-    let path = config_path();
+fn save_cache(path: &Path, devices: &[Device]) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -111,38 +111,71 @@ fn save_cache(devices: &[Device]) -> Result<()> {
     Ok(())
 }
 
-fn merge(cached: Vec<Device>, fresh: Vec<Device>) -> Vec<Device> {
-    let mut result = cached;
-    for d in fresh {
-        merge_device(&mut result, d);
-    }
-    result
+type Scan = Box<dyn FnMut(Duration) -> Result<Vec<Device>> + Send>;
+type Clock = Box<dyn Fn() -> i64 + Send>;
+
+/// The device cache plus the scanner that refreshes it.
+///
+/// A scan is authoritative: it replaces the cache, so only receivers observed
+/// in the most recent scan are ever returned. Cache hits are allowed only
+/// when every cached receiver is within `max_age`, so one fresh receiver
+/// cannot keep an expired one (or a vanished stereo mate) alive. Pairing
+/// credentials live in a separate store and are never touched here.
+pub struct DeviceCache {
+    path: PathBuf,
+    scan: Scan,
+    clock: Clock,
 }
 
-/// Return cached devices when fresh; otherwise run an mDNS scan, merge, and
-/// persist. When `name` is set, a scan is forced if it isn't already cached.
+impl DeviceCache {
+    /// `devices.json` under `AIRPLAY_CONFIG_DIR` (or `~/.airplay`), scanned with mDNS.
+    pub fn open_default() -> Self {
+        Self::new(config_path(), discover, now_unix)
+    }
+
+    /// A cache at `path` with an injected scanner and clock (unix seconds).
+    pub fn new(
+        path: impl Into<PathBuf>,
+        scan: impl FnMut(Duration) -> Result<Vec<Device>> + Send + 'static,
+        clock: impl Fn() -> i64 + Send + 'static,
+    ) -> Self {
+        Self { path: path.into(), scan: Box::new(scan), clock: Box::new(clock) }
+    }
+
+    /// Receivers currently available. `max_age == 0` is an explicit refresh:
+    /// always scan and return exactly what that scan observed. Otherwise use
+    /// the cache when every entry is fresh (and, when `name` is set, the named
+    /// receiver is cached with an address), else scan.
+    pub fn lookup(&mut self, name: &str, timeout: Duration, max_age: Duration) -> Result<Vec<Device>> {
+        let now = (self.clock)();
+        if !max_age.is_zero() {
+            let cached = read_cache(&self.path).unwrap_or_default();
+            let age = max_age.as_secs() as i64;
+            let all_fresh = !cached.is_empty() && cached.iter().all(|d| d.last_seen <= now && now - d.last_seen <= age);
+            let usable = all_fresh
+                && (name.is_empty() || find_device(&cached, name).is_some_and(|d| d.ip().is_some() && d.record.has_flags));
+            if usable {
+                return Ok(cached);
+            }
+        }
+
+        let mut seen = Vec::new();
+        for mut d in (self.scan)(timeout)? {
+            d.last_seen = now;
+            merge_device(&mut seen, d);
+        }
+        let _ = save_cache(&self.path, &seen);
+
+        if !name.is_empty() && find_device(&seen, name).is_none() {
+            anyhow::bail!("device {name:?} not found (scanned {} devices)", seen.len());
+        }
+        Ok(seen)
+    }
+}
+
+/// [`DeviceCache::lookup`] on the default cache with mDNS discovery.
 pub fn load_or_discover(name: &str, timeout: Duration, max_age: Duration) -> Result<Vec<Device>> {
-    let cached = read_cache().unwrap_or_default();
-
-    if !cached.is_empty() {
-        let now = now_unix();
-        let fresh = cached.iter().any(|d| now - d.last_seen <= max_age.as_secs() as i64);
-        if fresh && name.is_empty() {
-            return Ok(cached);
-        }
-        if !name.is_empty() && find_device(&cached, name).is_some_and(|d| d.ip().is_some() && d.record.has_flags) {
-            return Ok(cached);
-        }
-    }
-
-    let discovered = discover(timeout).unwrap_or_default();
-    let merged = merge(cached, discovered);
-    let _ = save_cache(&merged);
-
-    if !name.is_empty() && find_device(&merged, name).is_none() {
-        anyhow::bail!("device {name:?} not found (scanned {} devices)", merged.len());
-    }
-    Ok(merged)
+    DeviceCache::open_default().lookup(name, timeout, max_age)
 }
 
 fn now_unix() -> i64 {

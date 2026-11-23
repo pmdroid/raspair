@@ -1,5 +1,5 @@
 use airplay_core::client::Client;
-use airplay_core::discovery::{self, Device};
+use airplay_core::discovery::{Device, DeviceCache};
 use airplay_core::pairing::{
     AuthMethod, CredentialStore, PairingError, PinChallenge, PinPairings, PinSource, Stored,
 };
@@ -28,17 +28,23 @@ pub trait Prompt {
 pub struct Live {
     store: Arc<dyn CredentialStore>,
     pairings: PinPairings,
+    cache: DeviceCache,
 }
 
 impl Live {
     pub fn new(store: Arc<dyn CredentialStore>) -> Self {
-        Self { pairings: PinPairings::new(store.clone()), store }
+        Self::with_cache(store, DeviceCache::open_default())
+    }
+
+    pub fn with_cache(store: Arc<dyn CredentialStore>, cache: DeviceCache) -> Self {
+        Self { pairings: PinPairings::new(store.clone()), store, cache }
     }
 }
 
 impl Backend for Live {
+    /// `max_age == 0` is an explicit refresh: only receivers seen by a new scan.
     fn devices(&mut self, max_age: Duration) -> Result<Vec<Device>> {
-        discovery::load_or_discover("", Duration::from_secs(5), max_age)
+        self.cache.lookup("", Duration::from_secs(5), max_age)
     }
 
     fn verify(&mut self, dev: &Device, password: Option<&str>) -> Result<()> {
@@ -447,6 +453,54 @@ pub(crate) mod tests {
         let code = cmd(&mut cli)?;
         let log = log.lock().unwrap().clone();
         Ok(Run { code, out: String::from_utf8(out).unwrap(), log })
+    }
+
+    pub(crate) type Seen = Arc<std::sync::Mutex<Vec<Device>>>;
+
+    /// The real `Live` backend over the shared `DeviceCache`, with a fake scan
+    /// (what the network currently answers) and a fixed clock.
+    pub(crate) fn live(store: Arc<dyn CredentialStore>, dir: &std::path::Path) -> (Live, Seen) {
+        let seen: Seen = Arc::default();
+        let scan = seen.clone();
+        let cache = DeviceCache::new(dir.join("devices.json"), move |_| Ok(scan.lock().unwrap().clone()), || 1_000_000);
+        (Live::with_cache(store, cache), seen)
+    }
+
+    pub(crate) fn at(mut d: Device, ip: &str) -> Device {
+        d.ipv4 = Some(ip.parse().unwrap());
+        d
+    }
+
+    #[test]
+    fn discover_lists_only_receivers_seen_by_the_latest_scan() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn CredentialStore> = Arc::new(FileStore::new(dir.path().join("state")));
+        store.save(&record("bb:01", AuthMethod::PairSetupPin, None)).unwrap();
+        let (mut backend, seen) = live(store.clone(), dir.path());
+        let mut list = |json: bool| {
+            let (mut prompt, mut out) = (Answers { interactive: false, answers: Vec::new(), log: Arc::default() }, Vec::new());
+            Cli { backend: &mut backend, store: &*store, prompt: &mut prompt, out: &mut out, json }.discover().unwrap();
+            String::from_utf8(out).unwrap()
+        };
+        let ids = |out: &str| -> Vec<(String, String, String)> {
+            let v: Value = serde_json::from_str(out).unwrap();
+            v["devices"].as_array().unwrap().iter().map(|d| (d["id"].as_str().unwrap().into(), d["address"].as_str().unwrap().into(), d["paired"].to_string())).collect()
+        };
+
+        *seen.lock().unwrap() = vec![at(apple_tv("aa:01", "A"), "192.0.2.1"), at(apple_tv("bb:01", "B"), "192.0.2.2")];
+        assert_eq!(ids(&list(true)).len(), 2);
+
+        *seen.lock().unwrap() = vec![at(apple_tv("aa:01", "A"), "192.0.2.1")];
+        let only_a = ids(&list(true));
+        assert_eq!(only_a, [("aa:01".into(), "192.0.2.1".into(), "null".into())]);
+        assert!(matches!(store.load("bb:01").unwrap(), Stored::Paired(_)), "B's pairing is untouched");
+
+        seen.lock().unwrap().clear();
+        assert_eq!(list(false), "no AirPlay devices found\n");
+        assert!(ids(&list(true)).is_empty());
+
+        *seen.lock().unwrap() = vec![at(apple_tv("bb:01", "B"), "192.0.2.77"), at(apple_tv("bb:01", "B"), "192.0.2.77")];
+        assert_eq!(ids(&list(true)), [("bb:01".into(), "192.0.2.77".into(), "\"pair_setup_pin\"".into())]);
     }
 
     #[test]
