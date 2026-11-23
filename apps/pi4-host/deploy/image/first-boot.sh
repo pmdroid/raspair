@@ -7,14 +7,7 @@
 # Safe to re-run.
 set -euo pipefail
 
-mkdir -p /var/lib/vinyl-bridge/rec /etc/vinyl-bridge
-if [[ ! -f /etc/vinyl-bridge/config.toml ]]; then
-  cp /usr/local/share/vinyl-bridge/config.example.toml /etc/vinyl-bridge/config.toml
-fi
-
-# Prefer eth0/wlan0 online before advertising mDNS.
-systemctl enable vinyl-bridge.service
-systemctl restart vinyl-bridge.service || true
+/usr/local/bin/vinyl-bridge-pi install
 
 echo "vinyl-bridge: service enabled. Check: systemctl status vinyl-bridge"
 echo "API: http://$(hostname -I | awk '{print $1}'):80/api/status"
